@@ -1,0 +1,1150 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'WAF + AWS Transfer Family + GuardDuty Malware Scanning Solution'
+
+Parameters:
+  UploadBucketName:
+    Type: String
+    Description: Name for the upload bucket
+    Default: upload-bucket-malware-scan
+  
+  CleanBucketName:
+    Type: String
+    Description: Name for the clean files bucket
+    Default: clean-bucket-malware-scan
+  
+  MalwareBucketName:
+    Type: String
+    Description: Name for the malware files bucket
+    Default: malware-bucket-malware-scan
+  
+  ErrorBucketName:
+    Type: String
+    Description: Name for the error files bucket
+    Default: error-bucket-malware-scan
+
+
+  SecurityTeamEmail:
+    Type: String
+    Description: Email address for security team notifications
+    Default: security-team@example.com
+
+  WAFLogGroupName:
+    Type: String
+    Description: AWS WAF Logging Log Group Name
+    Default: aws-waf-logs-malware-scan
+
+Resources:
+  # KMS Key for S3 Encryption
+  KMSEncryptionKey:
+    Type: AWS::KMS::Key
+    Properties:
+      Description: 'KMS Key for S3 bucket encryption'
+      EnableKeyRotation: true
+      PendingWindowInDays: 30
+      KeyPolicy:
+        Statement:
+          - Sid: Enable IAM User Permissions
+            Effect: Allow
+            Principal:
+              AWS: !Sub 'arn:aws:iam::${AWS::AccountId}:root'
+            Action: 'kms:*'
+            Resource: '*'
+          - Sid: Allowing Cloudwatch Logs to be encrypted
+            Effect: Allow
+            Principal:
+              Service: !Sub 'logs.${AWS::Region}.amazonaws.com'
+            Action:
+            - kms:Encrypt
+            - kms:Decrypt
+            - kms:ReEncrypt*
+            - kms:GenerateDataKey*
+            - kms:Describe*
+            Resource: "*"
+            
+  KMSKeyAlias:
+    Type: 'AWS::KMS::Alias'
+    Properties:
+      AliasName: alias/TransferFamily-KMS-Key
+      TargetKeyId: !Ref KMSEncryptionKey
+
+  # S3 Buckets
+  UploadBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub '${UploadBucketName}-${AWS::AccountId}'
+      VersioningConfiguration:
+        Status: Enabled
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: aws:kms
+              KMSMasterKeyID: !Ref KMSEncryptionKey
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      LoggingConfiguration:
+        DestinationBucketName: !Ref UploadAccessLoggingBucket
+        LogFilePrefix: "bucket-access-logs/"
+  # Log bucket to store access logs
+  UploadAccessLoggingBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub '${UploadBucketName}-access-logs-${AWS::AccountId}'
+      # VersioningConfiguration:
+      #   Status: Enabled
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: aws:kms  # Using S3-managed keys for logs is common practice
+              KMSMasterKeyID: !Ref KMSEncryptionKey              
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      LifecycleConfiguration:
+        Rules:
+          - Id: LogRetentionRule
+            Status: Enabled
+            ExpirationInDays: 90  # Retain logs for 90 days
+            NoncurrentVersionExpirationInDays: 30  # Delete old versions after 30 days
+            AbortIncompleteMultipartUpload:
+              DaysAfterInitiation: 7
+          - Id: LogTransitionRule
+            Status: Enabled
+            Transitions:
+              - TransitionInDays: 30
+                StorageClass: STANDARD_IA
+              - TransitionInDays: 60
+                StorageClass: GLACIER
+
+  UploadAccessLoggingBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref UploadAccessLoggingBucket
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: AWSLogDeliveryWrite
+            Effect: Allow
+            Principal:
+              Service: logging.s3.amazonaws.com
+            Action:
+              - s3:PutObject
+            Resource: !Sub 'arn:aws:s3:::${UploadAccessLoggingBucket}/bucket-access-logs/*'
+            Condition:
+              StringEquals:
+                'aws:SourceAccount': !Ref 'AWS::AccountId'
+          - Sid: DenyUnencryptedTransport
+            Effect: Deny
+            Principal: '*'
+            Action: s3:*
+            Resource:
+              - !Sub 'arn:aws:s3:::${UploadAccessLoggingBucket}'
+              - !Sub 'arn:aws:s3:::${UploadAccessLoggingBucket}/*'
+            Condition:
+              Bool:
+                'aws:SecureTransport': false
+    DependsOn: UploadAccessLoggingBucket
+
+  CleanBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub '${CleanBucketName}-${AWS::AccountId}'
+      VersioningConfiguration:
+        Status: Enabled
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: aws:kms
+              KMSMasterKeyID: !Ref KMSEncryptionKey
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      LoggingConfiguration:
+        DestinationBucketName: !Ref CleanAccessLoggingBucket
+        LogFilePrefix: "bucket-access-logs/"
+      # Added lifecycle configuration
+      LifecycleConfiguration:
+        Rules:
+          - Id: DataRetentionRule
+            Status: Enabled
+            NoncurrentVersionExpirationInDays: 90  # Delete old versions after 90 days
+            AbortIncompleteMultipartUpload:
+              DaysAfterInitiation: 7
+          - Id: DataTransitionRule
+            Status: Enabled
+            Transitions:
+              - TransitionInDays: 30
+                StorageClass: STANDARD_IA  # Move to infrequent access after 30 days
+              - TransitionInDays: 90
+                StorageClass: INTELLIGENT_TIERING  # Move to intelligent tiering after 90 days
+              - TransitionInDays: 180
+                StorageClass: GLACIER  # Archive after 180 days
+          - Id: DeleteMarkerCleanup
+            Status: Enabled
+            ExpiredObjectDeleteMarker: true
+
+  # Log bucket to store access logs
+  CleanAccessLoggingBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub '${CleanBucketName}-access-logs-${AWS::AccountId}'
+      # VersioningConfiguration:
+      #   Status: Enabled
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: aws:kms  # Using S3-managed keys for logs is common practice
+              KMSMasterKeyID: !Ref KMSEncryptionKey              
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      LifecycleConfiguration:
+        Rules:
+          - Id: LogRetentionRule
+            Status: Enabled
+            ExpirationInDays: 90  # Retain logs for 90 days
+            NoncurrentVersionExpirationInDays: 30  # Delete old versions after 30 days
+            AbortIncompleteMultipartUpload:
+              DaysAfterInitiation: 7
+          - Id: LogTransitionRule
+            Status: Enabled
+            Transitions:
+              - TransitionInDays: 30
+                StorageClass: STANDARD_IA
+              - TransitionInDays: 60
+                StorageClass: GLACIER
+
+  CleanAccessLoggingBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref CleanAccessLoggingBucket
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: AWSLogDeliveryWrite
+            Effect: Allow
+            Principal:
+              Service: logging.s3.amazonaws.com
+            Action:
+              - s3:PutObject
+            Resource: !Sub 'arn:aws:s3:::${CleanAccessLoggingBucket}/bucket-access-logs/*'
+            Condition:
+              StringEquals:
+                'aws:SourceAccount': !Ref 'AWS::AccountId'
+          - Sid: DenyUnencryptedTransport
+            Effect: Deny
+            Principal: '*'
+            Action: s3:*
+            Resource:
+              - !Sub 'arn:aws:s3:::${CleanAccessLoggingBucket}'
+              - !Sub 'arn:aws:s3:::${CleanAccessLoggingBucket}/*'
+            Condition:
+              Bool:
+                'aws:SecureTransport': false
+    DependsOn: CleanAccessLoggingBucket
+
+  MalwareBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub '${MalwareBucketName}-${AWS::AccountId}'
+      VersioningConfiguration:
+        Status: Enabled
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: aws:kms
+              KMSMasterKeyID: !Ref KMSEncryptionKey
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      LoggingConfiguration:
+        DestinationBucketName: !Ref MalwareAccessLoggingBucket
+        LogFilePrefix: "bucket-access-logs/"
+      # Added lifecycle configuration
+      LifecycleConfiguration:
+        Rules:
+          - Id: DataRetentionRule
+            Status: Enabled
+            NoncurrentVersionExpirationInDays: 90  # Delete old versions after 90 days
+            AbortIncompleteMultipartUpload:
+              DaysAfterInitiation: 7
+          - Id: DataTransitionRule
+            Status: Enabled
+            Transitions:
+              - TransitionInDays: 30
+                StorageClass: STANDARD_IA  # Move to infrequent access after 30 days
+              - TransitionInDays: 90
+                StorageClass: INTELLIGENT_TIERING  # Move to intelligent tiering after 90 days
+              - TransitionInDays: 180
+                StorageClass: GLACIER  # Archive after 180 days
+          - Id: DeleteMarkerCleanup
+            Status: Enabled
+            ExpiredObjectDeleteMarker: true
+
+  # Log bucket to store access logs
+  MalwareAccessLoggingBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub '${MalwareBucketName}-access-logs-${AWS::AccountId}'
+      # VersioningConfiguration:
+      #   Status: Enabled
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: aws:kms  # Using S3-managed keys for logs is common practice
+              KMSMasterKeyID: !Ref KMSEncryptionKey              
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      LifecycleConfiguration:
+        Rules:
+          - Id: LogRetentionRule
+            Status: Enabled
+            ExpirationInDays: 90  # Retain logs for 90 days
+            NoncurrentVersionExpirationInDays: 30  # Delete old versions after 30 days
+            AbortIncompleteMultipartUpload:
+              DaysAfterInitiation: 7
+          - Id: LogTransitionRule
+            Status: Enabled
+            Transitions:
+              - TransitionInDays: 30
+                StorageClass: STANDARD_IA
+              - TransitionInDays: 60
+                StorageClass: GLACIER
+
+  MalwareAccessLoggingBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref MalwareAccessLoggingBucket
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: AWSLogDeliveryWrite
+            Effect: Allow
+            Principal:
+              Service: logging.s3.amazonaws.com
+            Action:
+              - s3:PutObject
+            Resource: !Sub 'arn:aws:s3:::${MalwareAccessLoggingBucket}/bucket-access-logs/*'
+            Condition:
+              StringEquals:
+                'aws:SourceAccount': !Ref 'AWS::AccountId'
+          - Sid: DenyUnencryptedTransport
+            Effect: Deny
+            Principal: '*'
+            Action: s3:*
+            Resource:
+              - !Sub 'arn:aws:s3:::${MalwareAccessLoggingBucket}'
+              - !Sub 'arn:aws:s3:::${MalwareAccessLoggingBucket}/*'
+            Condition:
+              Bool:
+                'aws:SecureTransport': false
+    DependsOn: MalwareAccessLoggingBucket
+
+  ErrorBucket:
+    Type: AWS::S3::Bucket
+    DependsOn: ErrorAccessLoggingBucket
+    Properties:
+      BucketName: !Sub '${ErrorBucketName}-${AWS::AccountId}'
+      VersioningConfiguration:
+        Status: Enabled
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: aws:kms
+              KMSMasterKeyID: !Ref KMSEncryptionKey
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      LoggingConfiguration:
+        DestinationBucketName: !Ref ErrorAccessLoggingBucket
+        LogFilePrefix: "bucket-access-logs/"
+      # Added lifecycle configuration
+      LifecycleConfiguration:
+        Rules:
+          - Id: DataRetentionRule
+            Status: Enabled
+            NoncurrentVersionExpirationInDays: 90  # Delete old versions after 90 days
+            AbortIncompleteMultipartUpload:
+              DaysAfterInitiation: 7
+          - Id: DataTransitionRule
+            Status: Enabled
+            Transitions:
+              - TransitionInDays: 30
+                StorageClass: STANDARD_IA  # Move to infrequent access after 30 days
+              - TransitionInDays: 90
+                StorageClass: INTELLIGENT_TIERING  # Move to intelligent tiering after 90 days
+              - TransitionInDays: 180
+                StorageClass: GLACIER  # Archive after 180 days
+          - Id: DeleteMarkerCleanup
+            Status: Enabled
+            ExpiredObjectDeleteMarker: true  # Clean up delete markers with no noncurrent versions
+
+  # Log bucket to store access logs
+  ErrorAccessLoggingBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub '${ErrorBucketName}-access-logs-${AWS::AccountId}'
+      # VersioningConfiguration:
+      #   Status: Enabled
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: aws:kms  # Using S3-managed keys for logs is common practice
+              KMSMasterKeyID: !Ref KMSEncryptionKey              
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      LifecycleConfiguration:
+        Rules:
+          - Id: LogRetentionRule
+            Status: Enabled
+            ExpirationInDays: 90  # Retain logs for 90 days
+            NoncurrentVersionExpirationInDays: 30  # Delete old versions after 30 days
+            AbortIncompleteMultipartUpload:
+              DaysAfterInitiation: 7
+          - Id: LogTransitionRule
+            Status: Enabled
+            Transitions:
+              - TransitionInDays: 30
+                StorageClass: STANDARD_IA
+              - TransitionInDays: 60
+                StorageClass: GLACIER
+
+  ErrorAccessLoggingBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref ErrorAccessLoggingBucket
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: AWSLogDeliveryWrite
+            Effect: Allow
+            Principal:
+              Service: logging.s3.amazonaws.com
+            Action:
+              - s3:PutObject
+            Resource: !Sub 'arn:aws:s3:::${ErrorAccessLoggingBucket}/bucket-access-logs/*'
+            Condition:
+              StringEquals:
+                'aws:SourceAccount': !Ref 'AWS::AccountId'
+          - Sid: DenyUnencryptedTransport
+            Effect: Deny
+            Principal: '*'
+            Action: s3:*
+            Resource:
+              - !Sub 'arn:aws:s3:::${ErrorAccessLoggingBucket}'
+              - !Sub 'arn:aws:s3:::${ErrorAccessLoggingBucket}/*'
+            Condition:
+              Bool:
+                'aws:SecureTransport': false
+    DependsOn: ErrorAccessLoggingBucket
+
+  UploadBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    DependsOn: TransferUserRole
+    Properties:
+      Bucket: !Ref UploadBucket
+      PolicyDocument:
+        Statement:
+          - Sid: DenyInsecureConnections
+            Effect: Deny
+            Principal: '*'
+            Action: 's3:*'
+            Resource:
+              - !Sub arn:aws:s3:::${UploadBucket}/*
+              - !Sub arn:aws:s3:::${UploadBucket}
+            Condition:
+              Bool:
+                'aws:SecureTransport': 'false'
+          - Sid: AllowTransferUserAccess
+            Effect: Allow
+            Principal:
+              AWS: !Sub 'arn:aws:iam::${AWS::AccountId}:role/${AWS::StackName}-TransferUserRole'
+            Action:
+              - s3:PutObject
+              - s3:PutObjectAcl
+              - s3:ListBucket
+              - s3:PutObjectTagging
+              - s3:GetObjectTagging
+              - s3:GetObjectVersion
+              - s3:GetObjectVersionTagging
+            Resource:
+              - !Sub arn:aws:s3:::${UploadBucket}/*
+              - !Sub arn:aws:s3:::${UploadBucket}
+          - Sid: AllowLambdaAccess
+            Effect: Allow
+            Principal:
+              AWS: !Sub 'arn:aws:iam::${AWS::AccountId}:role/FileRoutingLambdaRole-${AWS::StackName}'
+            Action:
+              # - s3:PutObject
+              # - s3:PutObjectAcl
+              - s3:ListBucket
+              - s3:PutObjectTagging
+              - s3:GetObjectTagging
+              - s3:GetObjectVersion
+              - s3:GetObjectVersionTagging
+            Resource:
+              - !Sub arn:aws:s3:::${UploadBucket}/*
+              - !Sub arn:aws:s3:::${UploadBucket}
+
+  # S3 Bucket Policies for Lambda Access
+  CleanBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref CleanBucket
+      PolicyDocument:
+        Statement:
+          - Sid: DenyInsecureConnections
+            Effect: Deny
+            Principal: '*'
+            Action: 's3:*'
+            Resource:
+              - !Sub arn:aws:s3:::${CleanBucket}/*
+              - !Sub arn:aws:s3:::${CleanBucket}
+            Condition:
+              Bool:
+                'aws:SecureTransport': 'false'
+          - Sid: AllowLambdaAccess
+            Effect: Allow
+            Principal:
+              AWS: !Sub 'arn:aws:iam::${AWS::AccountId}:role/FileRoutingLambdaRole-${AWS::StackName}'
+            Action:
+              - s3:PutObject
+              - s3:PutObjectAcl
+              - s3:ListBucket
+              - s3:PutObjectTagging
+              - s3:GetObjectTagging
+              - s3:GetObjectVersion
+              - s3:GetObjectVersionTagging
+            Resource:
+              - !Sub arn:aws:s3:::${CleanBucket}/*
+              - !Sub arn:aws:s3:::${CleanBucket}            
+
+  MalwareBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref MalwareBucket
+      PolicyDocument:
+        Statement:
+          - Sid: DenyInsecureConnections
+            Effect: Deny
+            Principal: '*'
+            Action: 's3:*'
+            Resource:
+              - !Sub arn:aws:s3:::${MalwareBucket}/*
+              - !Sub arn:aws:s3:::${MalwareBucket}
+            Condition:
+              Bool:
+                'aws:SecureTransport': 'false'
+          - Sid: AllowLambdaAccess
+            Effect: Allow
+            Principal:
+              AWS: !Sub 'arn:aws:iam::${AWS::AccountId}:role/FileRoutingLambdaRole-${AWS::StackName}'
+            Action:
+              - s3:PutObject
+              - s3:PutObjectAcl
+              - s3:ListBucket
+              - s3:PutObjectTagging
+              - s3:GetObjectTagging
+              - s3:GetObjectVersion
+              - s3:GetObjectVersionTagging
+            Resource:
+              - !Sub arn:aws:s3:::${MalwareBucket}/*
+              - !Sub arn:aws:s3:::${MalwareBucket}
+
+  ErrorBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref ErrorBucket
+      PolicyDocument:
+        Statement:
+          - Sid: DenyInsecureConnections
+            Effect: Deny
+            Principal: '*'
+            Action: 's3:*'
+            Resource:
+              - !Sub arn:aws:s3:::${ErrorBucket}/*
+              - !Sub arn:aws:s3:::${ErrorBucket}
+            Condition:
+              Bool:
+                'aws:SecureTransport': 'false'
+          - Sid: AllowLambdaAccess
+            Effect: Allow
+            Principal:
+              AWS: !Sub 'arn:aws:iam::${AWS::AccountId}:role/FileRoutingLambdaRole-${AWS::StackName}'
+            Action:
+              - s3:PutObject
+              - s3:PutObjectAcl
+              - s3:ListBucket
+              - s3:PutObjectTagging
+              - s3:GetObjectTagging
+              - s3:GetObjectVersion
+              - s3:GetObjectVersionTagging
+            Resource:
+              - !Sub arn:aws:s3:::${ErrorBucket}/*
+              - !Sub arn:aws:s3:::${ErrorBucket}
+
+  # AWS WAF Web ACL
+  WAFWebACL:
+    Type: AWS::WAFv2::WebACL
+    Properties:
+      Description: WAF for Transfer Family Protection
+      Name: latest-TransferFamilyProtection
+      Scope: REGIONAL
+      DefaultAction:
+        Allow: {}
+      VisibilityConfig:
+        CloudWatchMetricsEnabled: true
+        MetricName: latest-TransferFamilyProtection
+        SampledRequestsEnabled: true
+      Rules:
+        - Name: RateLimitRule
+          Priority: 0
+          Action:
+            Block: {}
+          VisibilityConfig:
+            CloudWatchMetricsEnabled: true
+            MetricName: RateLimitRule
+            SampledRequestsEnabled: true
+          Statement:
+            RateBasedStatement:
+              Limit: 100
+              AggregateKeyType: IP
+        - Name: AWS-AWSManagedRulesCommonRuleSet
+          Priority: 1
+          OverrideAction:
+            None: {}
+          VisibilityConfig:
+            SampledRequestsEnabled: true
+            CloudWatchMetricsEnabled: true
+            MetricName: AWS-AWSManagedRulesCommonRuleSet
+          Statement:
+            ManagedRuleGroupStatement:
+              VendorName: AWS
+              Name: AWSManagedRulesCommonRuleSet
+        - Name: AWSManagedRulesKnownBadInputsRuleSet
+          Priority: 2
+          OverrideAction:
+            None: {}
+          VisibilityConfig:
+            SampledRequestsEnabled: true
+            CloudWatchMetricsEnabled: true
+            MetricName: AWSManagedRulesKnownBadInputsRuleSet
+          Statement:
+            ManagedRuleGroupStatement:
+              VendorName: AWS
+              Name: AWSManagedRulesKnownBadInputsRuleSet
+        # Amazon IP Reputation List
+        - Name: 'AWS-AWSManagedRulesAmazonIpReputationList'
+          Priority: 3
+          OverrideAction:
+            None: {}
+          VisibilityConfig:
+            SampledRequestsEnabled: true
+            CloudWatchMetricsEnabled: true
+            MetricName: 'AWS-AWSManagedRulesAmazonIpReputationList'
+          Statement:
+            ManagedRuleGroupStatement:
+              VendorName: 'AWS'
+              Name: 'AWSManagedRulesAmazonIpReputationList'
+              ExcludedRules: []
+        # Anonymous IP List
+        - Name: 'AWS-AWSManagedRulesAnonymousIpList'
+          Priority: 4
+          OverrideAction:
+            None: {}
+          VisibilityConfig:
+            SampledRequestsEnabled: true
+            CloudWatchMetricsEnabled: true
+            MetricName: 'AWS-AWSManagedRulesAnonymousIpList'
+          Statement:
+            ManagedRuleGroupStatement:
+              VendorName: 'AWS'
+              Name: 'AWSManagedRulesAnonymousIpList'
+              ExcludedRules: []
+  # Cognito User Pool
+  UserPool:
+    Type: AWS::Cognito::UserPool
+    Properties:
+      UserPoolName: !Sub 'SFTPUserPool-${AWS::AccountId}'
+      AdminCreateUserConfig:
+        AllowAdminCreateUserOnly: false
+      UsernameAttributes: []
+      UsernameConfiguration:
+        CaseSensitive: false      
+      AutoVerifiedAttributes:
+        - email
+      Schema:
+        - Name: email
+          AttributeDataType: String
+          Mutable: true
+          Required: true
+        - Name: name
+          AttributeDataType: String
+          Mutable: true
+          Required: false
+        - Name: phone_number
+          AttributeDataType: String
+          Mutable: true
+          Required: false
+      Policies:
+        PasswordPolicy:
+          MinimumLength: 8
+          RequireLowercase: true
+          RequireNumbers: true
+          RequireSymbols: true
+          RequireUppercase: true                  
+      MfaConfiguration: "OFF"
+      AccountRecoverySetting:
+        RecoveryMechanisms:
+          - Name: verified_email
+            Priority: 1
+          - Name: verified_phone_number
+            Priority: 2
+
+  # Cognito User Pool Client
+  UserPoolClient:
+    Type: AWS::Cognito::UserPoolClient
+    Properties:
+      UserPoolId: !Ref UserPool
+      ClientName: !Sub 'SFTPClient-${AWS::AccountId}'
+      GenerateSecret: false
+      ExplicitAuthFlows:
+        - ALLOW_ADMIN_USER_PASSWORD_AUTH
+        - ALLOW_USER_PASSWORD_AUTH
+        - ALLOW_REFRESH_TOKEN_AUTH
+      PreventUserExistenceErrors: ENABLED
+
+  # WAF WebACL Association with Cognito User Pool
+  WAFWebACLAssociation:
+    Type: AWS::WAFv2::WebACLAssociation
+    Properties:
+      ResourceArn: !GetAtt UserPool.Arn
+      WebACLArn: !GetAtt WAFWebACL.Arn
+    DependsOn:
+      - WAFWebACL
+      - UserPool
+  # IAM Role for Transfer Family
+  TransferLoggingRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: transfer.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSTransferLoggingAccess
+
+  TransferUserRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub '${AWS::StackName}-TransferUserRole'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: transfer.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: TransferS3Access
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - s3:ListBucket
+                  - s3:GetBucketLocation
+                Resource: !Sub 'arn:aws:s3:::${UploadBucketName}-${AWS::AccountId}'
+              - Effect: Allow
+                Action:
+                  - s3:PutObject
+                  - s3:GetObject
+                  - s3:DeleteObject
+                Resource: !Sub 'arn:aws:s3:::${UploadBucketName}-${AWS::AccountId}/*'
+        - PolicyName: TransferKMSAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - kms:Decrypt
+                  - kms:GenerateDataKey
+                  - kms:DescribeKey
+                Resource: !GetAtt KMSEncryptionKey.Arn
+
+  # Authentication Lambda Function
+  AuthLambdaRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: CognitoAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - cognito-idp:AdminInitiateAuth
+                  - cognito-idp:AdminGetUser
+                Resource: !GetAtt UserPool.Arn
+
+  AuthLambdaFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      Description: "Auth Lambda Function for Transfer Family SFTP Server"
+      Handler: index.handler
+      Role: !GetAtt AuthLambdaRole.Arn
+      Runtime: python3.12
+      Timeout: 30
+      ReservedConcurrentExecutions: 2
+      Environment:
+        Variables:
+          USER_POOL_ID: !Ref UserPool
+          CLIENT_ID: !Ref UserPoolClient
+          UPLOAD_BUCKET: !Sub '${UploadBucketName}-${AWS::AccountId}'
+          AWS_ACCOUNT_ID: !Ref 'AWS::AccountId'
+          AWS_STACK_NAME: !Ref 'AWS::StackName'
+      Code:
+        ZipFile: |
+          import json
+          import boto3
+          import os
+          import copy
+          
+          cognito = boto3.client('cognito-idp')
+          def handler(event, context):
+              
+              username = event.get('username')
+              password = event.get('password', '')
+              
+              if not username:
+                  print("No username provided")
+                  return {}
+              
+              # Handle password authentication
+              if password:
+                  try:
+                      print(f"Attempting authentication for user: {username}")
+                      
+                      # Authenticate user against Cognito
+                      response = cognito.admin_initiate_auth(
+                          UserPoolId=os.environ['USER_POOL_ID'],
+                          ClientId=os.environ['CLIENT_ID'],
+                          AuthFlow='ADMIN_NO_SRP_AUTH',
+                          AuthParameters={
+                              'USERNAME': username,
+                              'PASSWORD': password
+                          }
+                      )
+                      
+                      print(f"Authentication successful for user: {username}")
+                      
+                      # Return Transfer Family compatible response
+                      auth_response = {
+                          'Role': f"arn:aws:iam::{os.environ['AWS_ACCOUNT_ID']}:role/{os.environ['AWS_STACK_NAME']}-TransferUserRole",
+                          'HomeDirectory': f"/{os.environ['UPLOAD_BUCKET']}"
+                      }
+                      
+                      print(f"Returning auth response: {json.dumps(auth_response)}")
+                      return auth_response
+                      
+                  except cognito.exceptions.NotAuthorizedException:
+                      print(f"Invalid credentials for user: {username}")
+                      return {}
+                  except cognito.exceptions.UserNotFoundException:
+                      print(f"User not found: {username}")
+                      return {}
+                  except Exception as e:
+                      print(f"Authentication error")
+                      return {}
+              
+              # Handle public key authentication (return empty for now)
+              else:
+                  print(f"Public key authentication not supported for user: {username}")
+                  return {}
+
+  # AWS Transfer Family SFTP Server
+  TransferServer:
+    Type: AWS::Transfer::Server
+    Properties:
+      EndpointType: PUBLIC
+      IdentityProviderType: AWS_LAMBDA
+      IdentityProviderDetails:
+        Function: !GetAtt AuthLambdaFunction.Arn
+      LoggingRole: !GetAtt TransferLoggingRole.Arn
+      Protocols:
+        - SFTP
+      SecurityPolicyName: TransferSecurityPolicy-2020-06
+      Tags: 
+        - Key: Name
+          Value: !Sub 'SFTP-Transfer-Server-${AWS::AccountId}'
+  # Lambda Permission for Transfer Family
+  TransferLambdaPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref AuthLambdaFunction
+      Action: lambda:InvokeFunction
+      Principal: transfer.amazonaws.com
+      SourceArn: !Sub 'arn:aws:transfer:${AWS::Region}:${AWS::AccountId}:server/*'
+
+  # SNS Topic for Security Notifications
+  SecurityNotificationTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      DisplayName: "Malware Detection Alerts"
+      TopicName: !Sub 'MalwareDetectionAlerts-${AWS::AccountId}'
+      KmsMasterKeyId: alias/TransferFamily-KMS-Key
+
+  SecurityTeamSubscription:
+    Type: AWS::SNS::Subscription
+    Properties:
+      TopicArn: !Ref SecurityNotificationTopic
+      Protocol: "email"
+      Endpoint: !Ref SecurityTeamEmail
+
+  # IAM Role for File Routing Lambda
+  FileRoutingLambdaRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub 'FileRoutingLambdaRole-${AWS::StackName}'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: S3Access
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:GetObjectVersion
+                  - s3:DeleteObject
+                Resource: !Sub 'arn:aws:s3:::${UploadBucketName}-${AWS::AccountId}/*'
+              - Effect: Allow
+                Action:
+                  - s3:PutObject
+                  - s3:PutObjectAcl
+                Resource:
+                  - !Sub 'arn:aws:s3:::${CleanBucketName}-${AWS::AccountId}/*'
+                  - !Sub 'arn:aws:s3:::${MalwareBucketName}-${AWS::AccountId}/*'
+                  - !Sub 'arn:aws:s3:::${ErrorBucketName}-${AWS::AccountId}/*'
+              - Effect: Allow
+                Action:
+                  - s3:ListBucket
+                  - s3:GetBucketLocation
+                Resource:
+                  - !Sub 'arn:aws:s3:::${UploadBucketName}-${AWS::AccountId}'
+                  - !Sub 'arn:aws:s3:::${CleanBucketName}-${AWS::AccountId}'
+                  - !Sub 'arn:aws:s3:::${MalwareBucketName}-${AWS::AccountId}'
+                  - !Sub 'arn:aws:s3:::${ErrorBucketName}-${AWS::AccountId}'
+        - PolicyName: KMSAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - kms:Decrypt
+                  - kms:GenerateDataKey
+                  - kms:DescribeKey
+                  - kms:CreateGrant
+                Resource: !GetAtt KMSEncryptionKey.Arn
+        - PolicyName: SNSPublish
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action: sns:Publish
+                Resource: !Ref SecurityNotificationTopic
+
+  # File Routing Lambda Function
+  FileRoutingLambdaFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      Description: "File Routing Lambda Function for Malware detection"
+      Handler: index.handler
+      Role: !GetAtt FileRoutingLambdaRole.Arn
+      Runtime: python3.12
+      Timeout: 60
+      ReservedConcurrentExecutions: 2
+      Environment:
+        Variables:
+          UPLOAD_BUCKET: !Sub '${UploadBucketName}-${AWS::AccountId}'
+          CLEAN_BUCKET: !Sub '${CleanBucketName}-${AWS::AccountId}'
+          MALWARE_BUCKET: !Sub '${MalwareBucketName}-${AWS::AccountId}'
+          ERROR_BUCKET: !Sub '${ErrorBucketName}-${AWS::AccountId}'
+          SNS_TOPIC_ARN: !Ref SecurityNotificationTopic
+          KMS_KEY_ID: !GetAtt KMSEncryptionKey.Arn
+      Code:
+        ZipFile: |
+          import os
+          import boto3
+          import json
+          import urllib.parse
+
+          s3_client = boto3.client('s3')
+          sns_client = boto3.client('sns')
+          
+          def handler(event, context):
+              print(f"Received event: {json.dumps(event)}")
+              
+              try:
+                  detail = event.get('detail', {})
+                  scan_result_details = detail.get('scanResultDetails', {})
+                  scan_result_status = scan_result_details.get('scanResultStatus', 'ERROR')
+                  threats = scan_result_details.get('threats')
+                  
+                  s3_object_details = detail.get('s3ObjectDetails', {})
+                  bucket_name = s3_object_details.get('bucketName')
+                  object_key = s3_object_details.get('objectKey')
+                  
+                  if not bucket_name or not object_key:
+                      print("Missing bucket name or object key")
+                      return {'statusCode': 400, 'body': 'Missing required fields'}
+                  
+                  object_key = urllib.parse.unquote_plus(object_key)
+                  
+                  # Route files based on scan result status
+                  if scan_result_status == 'NO_THREATS_FOUND':
+                      destination_bucket = os.environ['CLEAN_BUCKET']
+                      print(f"File is clean: {object_key}")
+                  elif scan_result_status == 'THREATS_FOUND':
+                      destination_bucket = os.environ['MALWARE_BUCKET']
+                      print(f"Malware detected in file: {object_key}")
+                      sns_client.publish(
+                          TopicArn=os.environ['SNS_TOPIC_ARN'],
+                          Subject="[SECURITY ALERT] Malware Detected",
+                          Message=f"Malware detected in file: {object_key}\nScan Status: {scan_result_status}\nThreats: {threats}"
+                      )
+                  elif scan_result_status in ['UNSUPPORTED', 'ACCESS_DENIED', 'FAILED']:
+                      destination_bucket = os.environ['ERROR_BUCKET']
+                      print(f"File routing to error bucket - Status: {scan_result_status}, File: {object_key}")
+                  else:
+                      destination_bucket = os.environ['ERROR_BUCKET']
+                      print(f"Unknown scan status: {scan_result_status}, File: {object_key}")
+                  
+                  print(f"Moving {object_key} from {bucket_name} to {destination_bucket}")
+                  
+                  s3_client.copy_object(
+                      CopySource={'Bucket': bucket_name, 'Key': object_key},
+                      Bucket=destination_bucket,
+                      Key=object_key,
+                      ServerSideEncryption='aws:kms',
+                      SSEKMSKeyId=os.environ['KMS_KEY_ID']
+                  )
+                  
+                  s3_client.delete_object(
+                      Bucket=bucket_name,
+                      Key=object_key
+                  )
+                  
+                  print(f"Successfully moved {object_key} to {destination_bucket}")
+                  return {'statusCode': 200, 'body': f'File processed: {scan_result_status}'}
+              except Exception as e:
+                  print(f"Error: {str(e)}")
+                  return {'statusCode': 500, 'body': f'Error: {str(e)}'}
+
+  # EventBridge Rule for GuardDuty Events
+  GuardDutyEventRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Description: "Capture GuardDuty Malware Protection events"
+      EventPattern:
+        source:
+          - "aws.guardduty"
+        detail-type:
+          - "GuardDuty Malware Protection Object Scan Result"
+        detail:
+          s3ObjectDetails:
+            bucketName:
+              - !Sub '${UploadBucketName}-${AWS::AccountId}'
+      State: "ENABLED"
+      Targets:
+        - Arn: !GetAtt FileRoutingLambdaFunction.Arn
+          Id: "FileRoutingTarget"
+
+  # Lambda Permission for EventBridge
+  EventBridgeLambdaPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref FileRoutingLambdaFunction
+      Action: lambda:InvokeFunction
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt GuardDutyEventRule.Arn
+
+  # CloudWatch Log Group for WAF
+  WAFLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Ref WAFLogGroupName
+      RetentionInDays: 7
+      KmsKeyId: !GetAtt KMSEncryptionKey.Arn
+
+  # WAF Logging Configuration
+  WAFLoggingConfiguration:
+    Type: AWS::WAFv2::LoggingConfiguration
+    Properties:
+      ResourceArn: !GetAtt WAFWebACL.Arn
+      LogDestinationConfigs:
+        - !Sub 'arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:${WAFLogGroupName}'
+    DependsOn: 
+      - WAFLogGroup
+Outputs:
+  TransferServerEndpoint:
+    Description: "SFTP Server Endpoint"
+    Value: !Sub "${TransferServer}.server.transfer.${AWS::Region}.amazonaws.com"
+  
+  UploadBucket:
+    Description: "Upload S3 bucket"
+    Value: !Ref UploadBucket
+  
+  CleanBucket:
+    Description: "Clean files S3 bucket"
+    Value: !Ref CleanBucket
+  
+  MalwareBucket:
+    Description: "Malware files S3 bucket"
+    Value: !Ref MalwareBucket
+  
+  ErrorBucket:
+    Description: "Error files S3 bucket"
+    Value: !Ref ErrorBucket
+  
+  UserPoolId:
+    Description: "Cognito User Pool ID"
+    Value: !Ref UserPool
