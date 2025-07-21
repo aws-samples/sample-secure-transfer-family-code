@@ -1,6 +1,6 @@
 # WAF + AWS Transfer Family + GuardDuty Malware Scanning Solution
 
-A comprehensive CloudFormation template that deploys a secure file transfer solution with automated malware scanning and intelligent file routing.
+A comprehensive CloudFormation template that deploys a secure file transfer solution with automated malware scanning and intelligent file routing within a VPC.
 
 ## 🏗️ Architecture Overview
 
@@ -10,95 +10,238 @@ A comprehensive CloudFormation template that deploys a secure file transfer solu
 
 This solution provides:
 - **Secure SFTP Server** with Cognito authentication via AWS Lambda
-- **WAF Protection** against common web attacks with comprehensive logging
+- **VPC-based Architecture** with public and private subnets
+- **WAF Protection** with custom IP filtering and rate limiting
 - **Automated Malware Scanning** using GuardDuty Malware Protection for S3
 - **Intelligent File Routing** based on scan results via EventBridge and Lambda
 - **Real-time Notifications** for security incidents via SNS
 - **KMS Encryption** for all S3 buckets with automatic key rotation
-- **Comprehensive S3 Access Logging** with dedicated logging buckets
-- **Lifecycle Management** for cost optimization and data retention
-- **Enhanced WAF Rules** including IP reputation and anonymous IP filtering
+- **VPC Endpoints** for secure AWS service access without internet
+- **IP-based Access Control** for both ingress and egress traffic
 
-## Data Flow
+## 🔍 Detailed Component Architecture
 
-1. **User Authentication Request**
+### VPC Network Architecture
+The solution deploys a secure VPC with the following components:
 
-- Users initiate SFTP connection to AWS Transfer Family server
-- WAF inspects incoming requests for malicious patterns, rate limiting, and known bad inputs
+- **VPC**: A dedicated VPC with CIDR block 10.0.0.0/16 (configurable)
+- **Subnets**:
+  - **Public Subnets**: Two public subnets (10.0.1.0/24, 10.0.2.0/24) in different AZs for high availability
+  - **Private Subnets**: Two private subnets (10.0.3.0/24, 10.0.4.0/24) in different AZs for Lambda functions
+- **Internet Gateway**: Provides internet access for public subnets
+- **NAT Gateway**: Allows outbound internet access from private subnets
+- **Route Tables**: Separate route tables for public and private subnets
+- **VPC Flow Logs**: Captures network traffic information for security analysis with 14-day retention
+- **Security Groups**:
+  - **Transfer Security Group**: Controls access to the SFTP server
+  - **Lambda Security Group**: Controls network access for Lambda functions
+  - **VPC Endpoint Security Groups**: Control access to VPC endpoints
 
-2. **WAF Protection Layer**
+### VPC Endpoints
+The solution creates the following VPC endpoints to enable secure communication without traversing the internet:
 
-- WAF WebACL applies security rules (rate limiting, common rule sets, known bad inputs)
-- Legitimate requests proceed; malicious requests are blocked
-- All WAF activity is logged to CloudWatch Logs
+- **S3 Gateway Endpoint**: Allows access to S3 buckets from within the VPC
+- **SNS Interface Endpoint**: Enables Lambda functions to publish to SNS topics
+- **CloudWatch Logs Interface Endpoint**: Allows Lambda functions to send logs to CloudWatch
+- **EC2 Interface Endpoint**: Enables Lambda functions to interact with EC2 API
+- **CloudFormation Interface Endpoint**: Enables Lambda functions to interact with CloudFormation API
 
-3. **Cognito Authentication**
+### AWS Transfer Family Configuration
+The solution deploys a secure SFTP server with the following components:
 
-- Authentication Lambda function validates user credentials against Cognito User Pool
-- Lambda returns user role and home directory permissions if authentication succeeds
+- **VPC-based SFTP Server**: Deployed in public subnets with Elastic IPs for high availability
+- **Custom Authentication**: Uses Lambda function to authenticate users against Cognito User Pool
+- **Security Policy**: Uses `TransferSecurityPolicy-2020-06` for secure SFTP connections
+- **Protocol**: SFTP only (port 22)
+- **Logging**: CloudWatch logging enabled via Transfer logging role
+- **Home Directory**: User's home directory is mapped to the upload bucket
+- **Access Control**: Users can only access their designated S3 bucket with least privilege permissions
 
-4. **Transfer Family SFTP Server**
+### Authentication Flow
+1. User connects to SFTP server with username and password
+2. Transfer Family invokes the Authentication Lambda function
+3. Lambda authenticates the user against Cognito User Pool
+4. If successful, Lambda returns the IAM role and home directory mapping
+5. Transfer Family assumes the role and provides access to the user
+6. User can now upload files to the designated S3 bucket
 
-- Authenticated users connect to public SFTP endpoint
-- Users can upload files to their designated home directory
+### Cognito User Pool Configuration
+- **User Pool**: Named `SFTPUserPool-${AWS::AccountId}`
+- **Client**: Named `SFTPClient-${AWS::AccountId}`
+- **Authentication Flows**: User password and admin authentication enabled
+- **Password Policy**: Minimum 8 characters with uppercase, lowercase, numbers, and symbols
+- **WAF Protection**: Web ACL associated with the User Pool for additional security
+- **Email Verification**: Email verification required for new users
 
-5. **File Upload to S3**
+### WAF Protection Configuration
+The solution implements a comprehensive WAF protection layer with the following components:
 
-- Files are uploaded to the upload-bucket with KMS encryption
-- S3 bucket policies restrict access to authorized Lambda functions only
+- **Regional Web ACL**: Named `latest-TransferFamilyProtection` with detailed logging to CloudWatch
+- **Custom IP Set Rule**: Configurable to either ALLOW or BLOCK specified IP addresses (priority 0)
+- **Rate Limiting Rule**: Limits requests to 100 per IP address to prevent brute force attacks (priority 1)
+- **AWS Managed Rule Sets**:
+  - **Common Rule Set**: Provides protection against common web exploits (priority 2)
+  - **Known Bad Inputs**: Blocks requests with known malicious patterns (priority 3)
+  - **Amazon IP Reputation List**: Blocks requests from IPs with poor reputation (priority 4)
+  - **Anonymous IP List**: Blocks requests from anonymous proxy services (priority 5)
+- **WAF Logging**: All WAF events are logged to a dedicated CloudWatch log group with 7-day retention
+- **Association**: The WAF Web ACL is associated with the Cognito User Pool to protect authentication
 
-6. **GuardDuty Malware Scanning**
+### S3 Security
+- **KMS encryption** at rest with automatic key rotation (365 days)
+- **Versioning enabled** on all primary buckets for data protection and recovery
+- **Public access blocked** on all buckets through comprehensive bucket policies
+- **Secure transport required** (HTTPS/TLS only) enforced through explicit deny policies
+- **Account-specific bucket names** to prevent conflicts using `${AWS::AccountId}` suffix
+- **Dedicated access logging buckets** for each primary bucket with separate retention policies:
+  - **Upload Bucket**: `${UploadBucketName}-access-logs-${AWS::AccountId}`
+  - **Clean Bucket**: `${CleanBucketName}-access-logs-${AWS::AccountId}`
+  - **Malware Bucket**: `${MalwareBucketName}-access-logs-${AWS::AccountId}`
+  - **Error Bucket**: `${ErrorBucketName}-access-logs-${AWS::AccountId}`
+- **Lifecycle policies** for automated data management and cost optimization:
+  - Primary buckets: 90-day retention for noncurrent versions
+  - Access logs: 90-day retention with transition to STANDARD_IA after 30 days and GLACIER after 60 days
+- **Intelligent tiering** and archival to Glacier for long-term storage:
+  - STANDARD_IA after 30 days
+  - INTELLIGENT_TIERING after 90 days
+  - GLACIER after 180 days
+- **Bucket policies** that enforce least privilege access for Lambda functions and Transfer users
 
-- GuardDuty automatically scans uploaded files for malware
-- Scan results are generated (NO_THREATS_FOUND, THREATS_FOUND, UNSUPPORTED, etc.)
+### Malware Scanning and File Routing
+The solution implements automated malware scanning and intelligent file routing with these components:
 
-7. **EventBridge Event Routing**
+- **GuardDuty Malware Protection**: Automatically scans files uploaded to the upload bucket
+- **EventBridge Rule**: Captures GuardDuty Malware Protection scan result events
+- **File Routing Lambda**: Processes scan results and routes files to appropriate buckets
+- **SNS Notifications**: Sends real-time alerts when malware is detected
 
-- GuardDuty publishes scan results to EventBridge
-- EventBridge rule captures malware scan events and triggers File Routing Lambda
+#### File Routing Logic
+```
+# Scan Result → Destination
+NO_THREATS_FOUND → Clean Bucket (with KMS encryption)
+THREATS_FOUND → Malware Bucket + SNS Alert (with KMS encryption)
+UNSUPPORTED → Error Bucket (with KMS encryption)
+ACCESS_DENIED → Error Bucket (with KMS encryption)
+FAILED → Error Bucket (with KMS encryption)
+```
 
-8. **File Routing Lambda Processing**
+### IP-Based Access Control
+The solution provides two layers of IP-based access control:
 
-- Lambda function processes scan results and routes files based on status:
-  - Clean files → clean-bucket
-  - Malware files → malware-bucket
-  - Error/unsupported files → error-bucket
+- **WAF IP Set**: Controls access at the application layer through the WAF Web ACL
+  - Can be configured to either ALLOW or BLOCK specified IPs
+  - Applied to the Cognito User Pool to protect authentication
+  - Logs all actions to CloudWatch
 
-9. **File Movement & Cleanup**
+- **Security Group Rules**: Controls access at the network layer
+  - Dynamically managed by a Lambda function
+  - Supports both ingress (inbound) and egress (outbound) traffic control
+  - Configurable to restrict outbound traffic to specific IPs
+  - Custom Lambda function updates rules based on CloudFormation parameters
 
-- Files are copied to appropriate destination bucket with KMS encryption
-- Original files are deleted from upload-bucket
-- File metadata and scan results are preserved
+### KMS Encryption Configuration
+The solution uses a dedicated KMS key for encryption with the following features:
 
-10. **SNS Notification (if malware detected)**
+- **Key Alias**: `alias/TransferFamily-KMS-Key`
+- **Automatic Key Rotation**: Enabled with 365-day rotation period
+- **Pending Window**: 30 days for key deletion
+- **Key Policy**: Grants permissions to:
+  - Root account for administrative access
+  - CloudWatch Logs for log encryption
+  - Lambda for environment variable encryption
+  - S3 for bucket encryption
+  - Transfer Family for file access
 
-- For malware detections, Lambda publishes alert to SNS topic
-- SNS sends email notifications to security team
+### Lambda Functions
+The solution includes several Lambda functions that work together:
 
-11. **Email Alert Delivery**
+#### Authentication Lambda
+- **Purpose**: Authenticates SFTP users against Cognito User Pool
+- **Runtime**: Python 3.12
+- **VPC Configuration**: Runs in private subnets
+- **Environment Variables**:
+  - USER_POOL_ID: Cognito User Pool ID
+  - CLIENT_ID: Cognito User Pool Client ID
+  - UPLOAD_BUCKET: Upload bucket name
+  - AWS_ACCOUNT_ID: AWS Account ID
+  - AWS_STACK_NAME: CloudFormation stack name
+- **Functionality**:
+  - Receives username/password from Transfer Family
+  - Authenticates against Cognito User Pool
+  - Returns IAM role and home directory mapping if successful
 
-- Security team receives immediate email notification with:
-- File name
-- Threat details
+#### File Routing Lambda
+- **Purpose**: Routes files based on malware scan results
+- **Runtime**: Python 3.12
+- **VPC Configuration**: Runs in private subnets
+- **Environment Variables**:
+  - UPLOAD_BUCKET: Upload bucket name
+  - CLEAN_BUCKET: Clean files bucket name
+  - MALWARE_BUCKET: Malware files bucket name
+  - ERROR_BUCKET: Error files bucket name
+  - SNS_TOPIC_ARN: SNS topic ARN for notifications
+  - KMS_KEY_ID: KMS key ID for encryption
+- **Functionality**:
+  - Processes GuardDuty Malware Protection scan results
+  - Moves files to appropriate buckets based on scan results
+  - Sends SNS notifications for malware detections
+
+#### Security Group Rules Lambda
+- **Purpose**: Dynamically manages security group rules
+- **Runtime**: Python 3.12
+- **VPC Configuration**: Runs in private subnets
+- **Functionality**:
+  - Adds/removes ingress rules for allowed IP addresses
+  - Optionally manages egress rules for the same IP addresses
+  - Handles CloudFormation create/update/delete events
+
+### EventBridge Integration
+The solution uses EventBridge to connect GuardDuty Malware Protection with the File Routing Lambda:
+
+- **Rule Pattern**: Captures GuardDuty Malware Protection scan result events
+- **Target**: File Routing Lambda function
+- **Event Source**: aws.guardduty
+- **Detail Type**: GuardDuty Malware Protection Object Scan Result
+- **Filter**: Only processes events for the upload bucket
 
 ## 📋 Prerequisites
 
-- AWS Account with appropriate permissions
-- **GuardDuty enabled** in your AWS account
-- **GuardDuty Malware Protection for S3** enabled
-- Valid email address for security notifications
+- AWS Account with appropriate permissions (Administrator access recommended for deployment)
+- **GuardDuty enabled** in your AWS account with the latest features
+- **GuardDuty Malware Protection for S3** enabled in your account
+  - This can be enabled in the GuardDuty console under "Protection Plans"
+  - Required for automated malware scanning functionality
+- Valid email address for security notifications (will receive malware alerts)
+- List of allowed IP addresses/CIDR blocks for access control (optional)
+- Sufficient VPC limits in your account (the solution creates a new VPC)
+- Sufficient EIP limits (the solution uses 3 Elastic IPs - 1 for NAT Gateway, 2 for Transfer endpoints)
 
 ## 🚀 Quick Start
 
 ### 1. Deploy the Stack
 
 ```bash
+# Clone the repository or download the template file
+# Make sure you're using the correct template filename (waf-transfer-family-template.yml)
+
 aws cloudformation create-stack \
   --stack-name malware-scanning-sftp \
   --template-body file://waf-transfer-family-template.yml \
-  --parameters ParameterKey=SecurityTeamEmail,ParameterValue=your-email@company.com \
+  --parameters \
+    ParameterKey=SecurityTeamEmail,ParameterValue=your-email@company.com \
+    ParameterKey=AllowedIPAddresses,ParameterValue=\"192.168.1.1/32,10.0.0.0/24\" \
+    ParameterKey=IPSetAction,ParameterValue=Allow \
+    ParameterKey=EnableEgressRules,ParameterValue=true \
+    ParameterKey=VpcCIDR,ParameterValue=10.0.0.0/16 \
   --capabilities CAPABILITY_NAMED_IAM
+
+# Monitor the stack creation progress
+aws cloudformation describe-stacks \
+  --stack-name malware-scanning-sftp \
+  --query 'Stacks[0].StackStatus'
 ```
+
+The deployment typically takes 15-20 minutes to complete due to the creation of VPC endpoints and other resources.
 
 ### 2. Create Cognito Users
 
@@ -116,15 +259,20 @@ aws cognito-idp admin-create-user \
   --user-pool-id $USER_POOL_ID \
   --username user@company.com \
   --user-attributes Name=email,Value=user@company.com \
-  --temporary-password <*********> \
+  --temporary-password TempPass123! \
   --message-action SUPPRESS
 
 # Set permanent password
 aws cognito-idp admin-set-user-password \
   --user-pool-id $USER_POOL_ID \
   --username user@company.com \
-  --password <*********> \
+  --password YourSecurePassword123! \
   --permanent
+
+# Verify the user was created successfully
+aws cognito-idp admin-get-user \
+  --user-pool-id $USER_POOL_ID \
+  --username user@company.com
 ```
 
 ### 3. Connect via SFTP
@@ -138,69 +286,30 @@ TRANSFER_ENDPOINT=$(aws cloudformation describe-stacks \
 
 # Connect via SFTP
 sftp user@company.com@$TRANSFER_ENDPOINT
+
+# Or use a GUI SFTP client with these settings:
+# Host: <TRANSFER_ENDPOINT value>
+# Username: user@company.com
+# Password: YourSecurePassword123!
+# Port: 22
 ```
 
-## 📊 File Processing Flow
+### 4. Test File Upload and Malware Scanning
 
-1. **Upload** → Files uploaded to upload bucket with KMS encryption
-2. **Access Logging** → All S3 operations logged to dedicated logging buckets
-3. **Scan** → GuardDuty automatically scans for malware
-4. **Route** → Files moved based on scan results:
-   - `NO_THREATS_FOUND` → Clean bucket
-   - `THREATS_FOUND` → Malware bucket + SNS alert
-   - `UNSUPPORTED/ACCESS_DENIED/FAILED` → Error bucket
-5. **Lifecycle Management** → Automated data transitions and cleanup
+```bash
+# Create a test file
+echo "This is a test file" > test.txt
 
-## 🔧 Configuration Parameters
+# Upload the file via SFTP
+sftp user@company.com@$TRANSFER_ENDPOINT << EOF
+put test.txt
+quit
+EOF
 
-| Parameter | Description | Default |
-|-----------|-------------|---------|
-| `UploadBucketName` | Upload bucket name | `upload-bucket-malware-scan` |
-| `CleanBucketName` | Clean files bucket | `clean-bucket-malware-scan` |
-| `MalwareBucketName` | Malware files bucket | `malware-bucket-malware-scan` |
-| `ErrorBucketName` | Error files bucket | `error-bucket-malware-scan` |
-| `SecurityTeamEmail` | Email for alerts | `security-team@example.com` |
-| `WAFLogGroupName` | WAF log group name | `aws-waf-logs-malware-scan` |
-
-## 🔒 Security Features
-
-### WAF Protection
-- **Rate limiting** (100 requests per IP)
-- **AWS Managed Rules** (Common Rule Set + Known Bad Inputs)
-- **IP Reputation Lists** (Amazon IP Reputation + Anonymous IP filtering)
-- **Regional scope** for Cognito User Pool protection
-- **Comprehensive Logging**: All security events logged to CloudWatch
-- **Intelligent Filtering**: Focuses on blocked and suspicious requests
-- **Real-time Monitoring**: CloudWatch metrics and sampled requests enabled
-
-### WAF Logging Features
-- **CloudWatch Integration**: Centralized log management with KMS encryption
-- **Configurable Retention**: 7 days default (configurable)
-- **Cost Optimization**: Smart filtering reduces log volume
-- **Security Analysis**: Built-in queries for threat detection
-- **Compliance Ready**: Audit trail for security incidents
-- **Enhanced Security**: CloudWatch logs encrypted with customer-managed KMS key
-
-### S3 Security
-- **KMS encryption** at rest with automatic key rotation
-- **Versioning enabled** on all primary buckets
-- **Public access blocked** on all buckets
-- **Secure transport required** (HTTPS/TLS only)
-- **Account-specific bucket names** to prevent conflicts
-- **Dedicated access logging buckets** for each primary bucket
-- **Lifecycle policies** for automated data management and cost optimization
-- **Intelligent tiering** and archival to Glacier for long-term storage
-
-### Access Control
-- **Cognito-based authentication** with customizable password policies
-- **Least privilege IAM roles** with scoped permissions
-- **Lambda-based authentication** for Transfer Family
-- **Secure credential handling** with password redaction in logs
-
-### Network Security
-- **Transfer Security Policy 2020-06** for SFTP connections
-- **Public endpoint** with WAF protection
-- **Encrypted data in transit** and at rest
+# GuardDuty will automatically scan the file
+# The File Routing Lambda will move it to the appropriate bucket based on scan results
+# You can check the status in CloudWatch Logs
+```
 
 ## 📈 Monitoring & Logging
 
@@ -211,13 +320,7 @@ sftp user@company.com@$TRANSFER_ENDPOINT
 - **Transfer Family**: CloudWatch logging enabled
 - **WAF Logs**: `<WAFLogGroupName>` (7-day retention, KMS encrypted)
 - **S3 Access Logs**: Stored in dedicated logging buckets with lifecycle policies
-
-### WAF Security Monitoring
-- **Blocked Requests**: Automatic logging of security threats
-- **Rate Limiting**: IP-based request throttling monitoring
-- **Attack Patterns**: SQL injection, XSS, and exploit attempt detection
-- **Geographic Analysis**: Country-based threat distribution
-- **Real-time Alerts**: CloudWatch alarms for security incidents
+- **VPC Flow Logs**: Stored in CloudWatch Logs with 14-day retention (configurable)
 
 ### SNS Notifications
 Malware detection triggers email alerts with:
@@ -225,6 +328,12 @@ Malware detection triggers email alerts with:
 - Scan result details
 - Threat information
 - Timestamp
+
+### CloudWatch Metrics
+- **WAF Metrics**: Request counts, blocked requests, allowed requests
+- **Transfer Family Metrics**: Connection count, file transfer metrics
+- **Lambda Metrics**: Invocation count, duration, error count
+- **S3 Metrics**: Storage metrics, request counts
 
 ## 🛠️ Troubleshooting
 
@@ -234,16 +343,36 @@ Malware detection triggers email alerts with:
 - Verify user exists in Cognito User Pool
 - Check user status (confirmed/enabled)
 - Ensure correct password
+- Verify IP is allowed in WAF IP set and security group
+- Check Authentication Lambda logs for errors
+- Verify Transfer Family service role has correct permissions
 
 **File Upload Access Denied**
 - Verify KMS key permissions
 - Check S3 bucket policies
 - Confirm IAM role permissions
+- Verify VPC endpoints are properly configured
+- Check Transfer Family service role has correct permissions
 
 **No Malware Scanning**
 - Enable GuardDuty in your account
 - Enable Malware Protection for S3
 - Verify EventBridge rule is active
+- Check Lambda function logs for errors
+- Verify S3 bucket notifications are configured correctly
+
+**Lambda Function Errors**
+- Check VPC configuration
+- Verify VPC endpoints are properly configured
+- Check IAM permissions
+- Review CloudWatch logs for specific errors
+- Verify KMS key permissions
+
+**WAF Not Blocking/Allowing Traffic**
+- Check WAF Web ACL configuration
+- Verify IP set contains correct IP addresses
+- Check WAF logs for request details
+- Verify WAF Web ACL association with Cognito User Pool
 
 ### Useful Commands
 
@@ -266,89 +395,22 @@ aws logs filter-log-events \
   --filter-pattern '{ $.action = "BLOCK" }' \
   --max-items 10
 
-# Check WAF metrics
-aws cloudwatch get-metric-statistics \
-  --namespace AWS/WAFV2 \
-  --metric-name BlockedRequests \
-  --dimensions Name=WebACL,Value=latest-TransferFamilyProtection \
-  --start-time $(date -u -d '1 hour ago' +%Y-%m-%dT%H:%M:%S) \
-  --end-time $(date -u +%Y-%m-%dT%H:%M:%S) \
-  --period 300 \
-  --statistics Sum
+# Check security group rules
+aws ec2 describe-security-groups \
+  --group-ids <SECURITY_GROUP_ID> \
+  --output table
+
+# Check Transfer Server status
+aws transfer describe-server \
+  --server-id <SERVER_ID>
+
+# List files in S3 buckets
+aws s3 ls s3://<BUCKET_NAME>/ --recursive
+
+# Check EventBridge rule
+aws events describe-rule \
+  --name <RULE_NAME>
 ```
-
-## 🔄 File Routing Logic
-
-```python
-# Scan Result → Destination
-NO_THREATS_FOUND → Clean Bucket (with KMS encryption)
-THREATS_FOUND → Malware Bucket + SNS Alert (with KMS encryption)
-UNSUPPORTED → Error Bucket (with KMS encryption)
-ACCESS_DENIED → Error Bucket (with KMS encryption)
-FAILED → Error Bucket (with KMS encryption)
-```
-
-## 🔐 KMS Encryption Details
-
-### KMS Key Configuration
-- **Key Rotation**: Enabled (automatic annual rotation)
-- **Key Policy**: Root account access with CloudWatch Logs permissions
-- **Alias**: `alias/TransferFamily-KMS-Key`
-- **Usage**: Encrypts all S3 buckets, SNS topics, and CloudWatch logs
-
-### Encrypted Resources
-- **All S3 Buckets**: Primary and access logging buckets
-- **SNS Topic**: Security notification topic
-- **CloudWatch Logs**: WAF logging with customer-managed KMS key
-- **File Transfers**: All moved files maintain KMS encryption
-
-## ⚡ Lambda Functions
-
-### Authentication Lambda
-- **Runtime**: Python 3.12
-- **Timeout**: 30 seconds
-- **Concurrency**: 2 reserved concurrent executions
-- **Purpose**: Authenticates SFTP users against Cognito User Pool
-- **Features**: 
-  - Password redaction in logs for security
-  - Support for Cognito authentication flow
-  - Returns Transfer Family compatible response
-
-### File Routing Lambda
-- **Runtime**: Python 3.12
-- **Timeout**: 60 seconds
-- **Concurrency**: 2 reserved concurrent executions
-- **Purpose**: Routes files based on GuardDuty scan results
-- **Features**:
-  - Automatic file movement between buckets
-  - SNS notifications for malware detection
-  - KMS encryption for moved files
-  - Error handling for various scan statuses
-
-## 👤 Cognito User Pool Configuration
-
-### User Pool Settings
-- **Name**: `SFTPUserPool-<AWS::AccountId>`
-- **Username Attributes**: Email (case insensitive)
-- **Auto-verified Attributes**: Email
-- **MFA**: MFA is currently disabled but it is recommended to enable MFA for cognito users in PROD environment.
-- **Account Recovery**: Email and phone number
-- **AdvancedSecurityMode**: AdvancedSecurityMode is disabled but it is recommended to enable Advanced Security Mode to add more controls. It will require Amazon Cognito Plus level subscription.
-
-### Password Policy
-- **Minimum Length**: 8 characters
-- **Require Lowercase**: Yes
-- **Require Uppercase**: Yes
-- **Require Numbers**: Yes
-- **Require Symbols**: Yes
-
-### User Pool Client
-- **Name**: `SFTPClient-<AWS::AccountId>`
-- **Auth Flows**: 
-  - ALLOW_ADMIN_USER_PASSWORD_AUTH
-  - ALLOW_USER_PASSWORD_AUTH
-  - ALLOW_REFRESH_TOKEN_AUTH
-- **Prevent User Existence Errors**: Enabled
 
 ## 📝 Stack Outputs
 
@@ -359,35 +421,11 @@ After deployment, the stack provides:
 - **MalwareBucket**: Malware files S3 bucket name
 - **ErrorBucket**: Error files S3 bucket name
 - **UserPoolId**: Cognito User Pool ID
-
-## 🗂️ S3 Bucket Structure
-
-### Primary Buckets
-- **upload-bucket-malware-scan-{AccountId}**: Initial file uploads
-- **clean-bucket-malware-scan-{AccountId}**: Verified clean files
-- **malware-bucket-malware-scan-{AccountId}**: Quarantined malware files
-- **error-bucket-malware-scan-{AccountId}**: Processing error files
-
-### Access Logging Buckets
-- **upload-bucket-malware-scan-access-logs-{AccountId}**: Upload bucket access logs
-- **clean-bucket-malware-scan-access-logs-{AccountId}**: Clean bucket access logs
-- **malware-bucket-malware-scan-access-logs-{AccountId}**: Malware bucket access logs
-- **error-bucket-malware-scan-access-logs-{AccountId}**: Error bucket access logs
-
-## 📋 Lifecycle Management
-
-### Primary Buckets
-- **30 days**: Transition to Standard-IA
-- **90 days**: Transition to Intelligent Tiering
-- **180 days**: Archive to Glacier
-- **90 days**: Delete old versions
-- **7 days**: Abort incomplete multipart uploads
-
-### Access Logging Buckets
-- **30 days**: Transition to Standard-IA
-- **60 days**: Archive to Glacier
-- **90 days**: Delete logs
-- **30 days**: Delete old versions
+- **VpcId**: VPC ID
+- **PublicSubnets**: Public subnet IDs
+- **PrivateSubnets**: Private subnet IDs
+- **WAFIPSetId**: WAF IP set ID
+- **WAFWebACLId**: WAF Web ACL ID
 
 ## 🧹 Cleanup
 
@@ -419,13 +457,16 @@ For issues or questions:
 2. Verify GuardDuty configuration
 3. Review IAM permissions
 4. Check S3 bucket policies
+5. Verify VPC endpoint configurations
+6. Check security group rules
 
 ## 🔐 Security Best Practices
 
-- Regularly rotate Cognito user passwords (symbols now required)
+- Regularly rotate Cognito user passwords and enable MFA
 - Monitor CloudWatch logs for suspicious activity
 - Review SNS notification logs
 - Keep WAF rules updated
+- Update allowed IP addresses as needed
 - Enable AWS Config for compliance monitoring
 - Monitor KMS key usage and rotation
 - Review S3 access logs regularly for unauthorized access

@@ -22,7 +22,6 @@ Parameters:
     Description: Name for the error files bucket
     Default: error-bucket-malware-scan
 
-
   SecurityTeamEmail:
     Type: String
     Description: Email address for security team notifications
@@ -33,12 +32,629 @@ Parameters:
     Description: AWS WAF Logging Log Group Name
     Default: aws-waf-logs-malware-scan
 
+  VPCFlowLogsLogGroupName:
+    Type: String
+    Description: VPC Flow Logs Log Group Name
+    Default: vpc-flow-logs-malware-scan
+    
+  VPCFlowLogsRetentionInDays:
+    Type: Number
+    Description: Number of days to retain VPC Flow Logs
+    Default: 14
+    AllowedValues: [1, 3, 5, 7, 14, 30, 60, 90, 120, 150, 180, 365, 400, 545, 731, 1827, 3653]
+
+  # VPC Configuration Parameters
+  VpcCIDR:
+    Type: String
+    Default: "10.0.0.0/16"
+    Description: CIDR block for the VPC
+  
+  PublicSubnet1CIDR:
+    Type: String
+    Default: "10.0.1.0/24"
+    Description: CIDR block for public subnet 1
+  
+  PublicSubnet2CIDR:
+    Type: String
+    Default: "10.0.2.0/24"
+    Description: CIDR block for public subnet 2
+  
+  PrivateSubnet1CIDR:
+    Type: String
+    Default: "10.0.3.0/24"
+    Description: CIDR block for private subnet 1
+  
+  PrivateSubnet2CIDR:
+    Type: String
+    Default: "10.0.4.0/24"
+    Description: CIDR block for private subnet 2
+
+  # IP Set Parameters
+  AllowedIPAddresses:
+    Type: CommaDelimitedList
+    Description: "Comma-separated list of allowed IP addresses or CIDR blocks (e.g., '192.168.1.1/32,10.0.0.0/24')"
+    Default: "127.0.0.1/32"
+
+  IPSetAction:
+    Type: String
+    Description: "Action to take for IPs in the IP set (Allow or Block)"
+    Default: "Allow"
+    AllowedValues:
+      - "Allow"
+      - "Block"
+
+  EnableEgressRules:
+    Type: String
+    Description: "Whether to create egress rules for the same IP addresses"
+    Default: "true"
+    AllowedValues:
+      - "true"
+      - "false"
+
+Conditions:
+  IsAllowAction: !Equals [!Ref IPSetAction, "Allow"]
+  HasAllowedIPs: !Not [!Equals [!Join ["", !Ref AllowedIPAddresses], ""]]
+
 Resources:
+  # VPC and Network Resources
+  VPC:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: !Ref VpcCIDR
+      EnableDnsSupport: true
+      EnableDnsHostnames: true
+      Tags:
+        - Key: Name
+          Value: !Sub "${AWS::StackName}-VPC"
+
+  # Internet Gateway
+  InternetGateway:
+    Type: AWS::EC2::InternetGateway
+    Properties:
+      Tags:
+        - Key: Name
+          Value: !Sub "${AWS::StackName}-IGW"
+
+  InternetGatewayAttachment:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      InternetGatewayId: !Ref InternetGateway
+      VpcId: !Ref VPC
+
+  # Public Subnets
+  PublicSubnet1:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      AvailabilityZone: !Select [0, !GetAZs ""]
+      CidrBlock: !Ref PublicSubnet1CIDR
+      MapPublicIpOnLaunch: true
+      Tags:
+        - Key: Name
+          Value: !Sub "${AWS::StackName}-PublicSubnet1"
+
+  PublicSubnet2:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      AvailabilityZone: !Select [1, !GetAZs ""]
+      CidrBlock: !Ref PublicSubnet2CIDR
+      MapPublicIpOnLaunch: true
+      Tags:
+        - Key: Name
+          Value: !Sub "${AWS::StackName}-PublicSubnet2"
+
+  # Private Subnets
+  PrivateSubnet1:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      AvailabilityZone: !Select [0, !GetAZs ""]
+      CidrBlock: !Ref PrivateSubnet1CIDR
+      Tags:
+        - Key: Name
+          Value: !Sub "${AWS::StackName}-PrivateSubnet1"
+
+  PrivateSubnet2:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      AvailabilityZone: !Select [1, !GetAZs ""]
+      CidrBlock: !Ref PrivateSubnet2CIDR
+      Tags:
+        - Key: Name
+          Value: !Sub "${AWS::StackName}-PrivateSubnet2"
+
+  # NAT Gateway for private subnets
+  NatGatewayEIP:
+    Type: AWS::EC2::EIP
+    DependsOn: InternetGatewayAttachment
+    Properties:
+      Domain: vpc
+
+  NatGateway:
+    Type: AWS::EC2::NatGateway
+    Properties:
+      AllocationId: !GetAtt NatGatewayEIP.AllocationId
+      SubnetId: !Ref PublicSubnet1
+      Tags:
+        - Key: Name
+          Value: !Sub "${AWS::StackName}-NatGateway"
+
+  # Route Tables
+  PublicRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref VPC
+      Tags:
+        - Key: Name
+          Value: !Sub "${AWS::StackName}-PublicRouteTable"
+
+  PublicRoute:
+    Type: AWS::EC2::Route
+    DependsOn: InternetGatewayAttachment
+    Properties:
+      RouteTableId: !Ref PublicRouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref InternetGateway
+
+  PublicSubnet1RouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      RouteTableId: !Ref PublicRouteTable
+      SubnetId: !Ref PublicSubnet1
+
+  PublicSubnet2RouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      RouteTableId: !Ref PublicRouteTable
+      SubnetId: !Ref PublicSubnet2
+
+  PrivateRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref VPC
+      Tags:
+        - Key: Name
+          Value: !Sub "${AWS::StackName}-PrivateRouteTable"
+
+  PrivateRoute:
+    Type: AWS::EC2::Route
+    Properties:
+      RouteTableId: !Ref PrivateRouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      NatGatewayId: !Ref NatGateway
+
+  PrivateSubnet1RouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      RouteTableId: !Ref PrivateRouteTable
+      SubnetId: !Ref PrivateSubnet1
+
+  PrivateSubnet2RouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      RouteTableId: !Ref PrivateRouteTable
+      SubnetId: !Ref PrivateSubnet2
+      
+  # VPC Flow Logs Resources
+  VPCFlowLogsLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Ref VPCFlowLogsLogGroupName
+      RetentionInDays: !Ref VPCFlowLogsRetentionInDays
+      KmsKeyId: !GetAtt KMSEncryptionKey.Arn
+
+  VPCFlowLogsRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: vpc-flow-logs.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: VPCFlowLogsPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                  - logs:DescribeLogGroups
+                  - logs:DescribeLogStreams
+                Resource: !Sub "arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:${VPCFlowLogsLogGroupName}:*"
+
+  VPCFlowLogs:
+    Type: AWS::EC2::FlowLog
+    Properties:
+      DeliverLogsPermissionArn: !GetAtt VPCFlowLogsRole.Arn
+      LogGroupName: !Ref VPCFlowLogsLogGroupName
+      ResourceId: !Ref VPC
+      ResourceType: VPC
+      TrafficType: ALL
+      LogDestinationType: cloud-watch-logs
+      MaxAggregationInterval: 60
+      Tags:
+        - Key: Name
+          Value: !Sub "${AWS::StackName}-VPC-FlowLogs"
+
+  # VPC Endpoints
+  S3VPCEndpoint:
+    Type: AWS::EC2::VPCEndpoint
+    Properties:
+      ServiceName: !Sub "com.amazonaws.${AWS::Region}.s3"
+      VpcId: !Ref VPC
+      RouteTableIds:
+        - !Ref PrivateRouteTable
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal: "*"
+            Action:
+              - "s3:*"
+            Resource:
+              - "*"
+
+  # SNS VPC Endpoint
+  SNSSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Security group for SNS VPC endpoint
+      VpcId: !Ref VPC
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          CidrIp: !Ref VpcCIDR
+          Description: Allow connectivity over 443 port
+      SecurityGroupEgress:
+        - IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          CidrIp: !Ref VpcCIDR
+          Description: Allow connectivity over 443 port
+  SNSVPCEndpoint:
+    Type: AWS::EC2::VPCEndpoint
+    Properties:
+      ServiceName: !Sub "com.amazonaws.${AWS::Region}.sns"
+      VpcEndpointType: Interface
+      VpcId: !Ref VPC
+      SubnetIds:
+        - !Ref PrivateSubnet1
+        - !Ref PrivateSubnet2
+      SecurityGroupIds:
+        - !Ref SNSSecurityGroup
+      PrivateDnsEnabled: true
+
+  TransferSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Security group for AWS Transfer Family with allowed IPs
+      VpcId: !Ref VPC
+      # Empty ingress rules - will be added by the custom resource
+
+  # Custom resource to add security group ingress rules
+  SecurityGroupIngressFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      Handler: index.handler
+      Role: !GetAtt SecurityGroupRulesFunctionRole.Arn
+      Runtime: python3.12
+      Timeout: 300
+      ReservedConcurrentExecutions: 2
+      VpcConfig:
+        SecurityGroupIds:
+          - !Ref LambdaSecurityGroup
+        SubnetIds:
+          - !Ref PrivateSubnet1
+          - !Ref PrivateSubnet2      
+      Code:
+        ZipFile: |
+          import json
+          import boto3
+          import cfnresponse
+          import logging
+          
+          logger = logging.getLogger()
+          logger.setLevel(logging.INFO)
+          
+          def handler(event, context):
+              logger.info('Received event: %s', json.dumps(event))
+              
+              # Initialize response
+              response_data = {}
+              physical_resource_id = event.get('PhysicalResourceId', context.log_stream_name)
+              
+              try:
+                  # Get properties from the event
+                  props = event['ResourceProperties']
+                  security_group_id = props['SecurityGroupId']
+                  ip_addresses = props['IPAddresses']
+                  port = int(props.get('Port', 22))
+                  enable_egress = props.get('EnableEgress', 'false').lower() == 'true'
+                  
+                  # Initialize EC2 client
+                  ec2 = boto3.client('ec2')
+                  
+                  # Handle create/update events
+                  if event['RequestType'] in ['Create', 'Update']:
+                      # For update, we need to revoke existing rules first
+                      if event['RequestType'] == 'Update' and 'OldResourceProperties' in event:
+                          old_ips = event['OldResourceProperties'].get('IPAddresses', [])
+                          old_enable_egress = event['OldResourceProperties'].get('EnableEgress', 'false').lower() == 'true'
+                          
+                          # Revoke old ingress rules
+                          for ip in old_ips:
+                              try:
+                                  ec2.revoke_security_group_ingress(
+                                      GroupId=security_group_id,
+                                      IpProtocol='tcp',
+                                      FromPort=port,
+                                      ToPort=port,
+                                      CidrIp=ip
+                                  )
+                                  logger.info(f"Revoked ingress for {ip}")
+                              except Exception as e:
+                                  logger.warning(f"Error revoking ingress rule for {ip}: {str(e)}")
+                          
+                          # Revoke old egress rules if they were enabled
+                          if old_enable_egress:
+                              for ip in old_ips:
+                                  try:
+                                      ec2.revoke_security_group_egress(
+                                          GroupId=security_group_id,
+                                          IpPermissions=[
+                                              {
+                                                  'IpProtocol': 'tcp',
+                                                  'FromPort': port,
+                                                  'ToPort': port,
+                                                  'IpRanges': [{'CidrIp': ip}]
+                                              }
+                                          ]
+                                      )
+                                      logger.info(f"Revoked egress for {ip}")
+                                  except Exception as e:
+                                      logger.warning(f"Error revoking egress rule for {ip}: {str(e)}")
+                      
+                      # Add new ingress rules
+                      for ip in ip_addresses:
+                          try:
+                              ec2.authorize_security_group_ingress(
+                                  GroupId=security_group_id,
+                                  IpProtocol='tcp',
+                                  FromPort=port,
+                                  ToPort=port,
+                                  CidrIp=ip
+                              )
+                              logger.info(f"Authorized ingress for {ip}")
+                          except Exception as e:
+                              if 'InvalidPermission.Duplicate' in str(e):
+                                  logger.info(f"Ingress rule for {ip} already exists")
+                              else:
+                                  logger.error(f"Error adding ingress rule for {ip}: {str(e)}")
+                                  raise
+                      
+                      # Add new egress rules if enabled
+                      if enable_egress:
+                          # First, remove the default allow all egress rule
+                          try:
+                              ec2.revoke_security_group_egress(
+                                  GroupId=security_group_id,
+                                  IpPermissions=[
+                                      {
+                                          'IpProtocol': '-1',
+                                          'IpRanges': [{'CidrIp': '0.0.0.0/0'}]
+                                      }
+                                  ]
+                              )
+                              logger.info("Removed default allow all egress rule")
+                          except Exception as e:
+                              logger.warning(f"Error removing default egress rule: {str(e)}")
+                          
+                          # Add specific egress rules
+                          for ip in ip_addresses:
+                              try:
+                                  ec2.authorize_security_group_egress(
+                                      GroupId=security_group_id,
+                                      IpPermissions=[
+                                          {
+                                              'IpProtocol': 'tcp',
+                                              'FromPort': port,
+                                              'ToPort': port,
+                                              'IpRanges': [{'CidrIp': ip}]
+                                          }
+                                      ]
+                                  )
+                                  logger.info(f"Authorized egress for {ip}")
+                              except Exception as e:
+                                  if 'InvalidPermission.Duplicate' in str(e):
+                                      logger.info(f"Egress rule for {ip} already exists")
+                                  else:
+                                      logger.error(f"Error adding egress rule for {ip}: {str(e)}")
+                                      raise
+                  
+                  # Handle delete event
+                  elif event['RequestType'] == 'Delete':
+                      # Revoke ingress rules
+                      for ip in ip_addresses:
+                          try:
+                              ec2.revoke_security_group_ingress(
+                                  GroupId=security_group_id,
+                                  IpProtocol='tcp',
+                                  FromPort=port,
+                                  ToPort=port,
+                                  CidrIp=ip
+                              )
+                              logger.info(f"Revoked ingress for {ip}")
+                          except Exception as e:
+                              logger.warning(f"Error revoking ingress rule for {ip}: {str(e)}")
+                      
+                      # Revoke egress rules if enabled
+                      enable_egress = props.get('EnableEgress', 'false').lower() == 'true'
+                      if enable_egress:
+                          for ip in ip_addresses:
+                              try:
+                                  ec2.revoke_security_group_egress(
+                                      GroupId=security_group_id,
+                                      IpPermissions=[
+                                          {
+                                              'IpProtocol': 'tcp',
+                                              'FromPort': port,
+                                              'ToPort': port,
+                                              'IpRanges': [{'CidrIp': ip}]
+                                          }
+                                      ]
+                                  )
+                                  logger.info(f"Revoked egress for {ip}")
+                              except Exception as e:
+                                  logger.warning(f"Error revoking egress rule for {ip}: {str(e)}")
+                          
+                          # Restore default allow all egress rule
+                          try:
+                              ec2.authorize_security_group_egress(
+                                  GroupId=security_group_id,
+                                  IpPermissions=[
+                                      {
+                                          'IpProtocol': '-1',
+                                          'IpRanges': [{'CidrIp': '0.0.0.0/0'}]
+                                      }
+                                  ]
+                              )
+                              logger.info("Restored default allow all egress rule")
+                          except Exception as e:
+                              logger.warning(f"Error restoring default egress rule: {str(e)}")
+                  
+                  response_data['Status'] = 'SUCCESS'
+                  cfnresponse.send(event, context, cfnresponse.SUCCESS, response_data, physical_resource_id)
+              
+              except Exception as e:
+                  logger.error('Error: %s', str(e))
+                  cfnresponse.send(event, context, cfnresponse.FAILED, {'Error': str(e)}, physical_resource_id)
+
+  SecurityGroupRulesFunctionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: EC2SecurityGroupAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - ec2:AuthorizeSecurityGroupIngress
+                  - ec2:RevokeSecurityGroupIngress
+                  - ec2:AuthorizeSecurityGroupEgress
+                  - ec2:RevokeSecurityGroupEgress
+                  - ec2:DescribeSecurityGroups
+                Resource:
+                  - !Sub 'arn:aws:ec2:${AWS::Region}:${AWS::AccountId}:security-group/*'
+                  - !Sub 'arn:aws:ec2:${AWS::Region}:${AWS::AccountId}:security-group-rule/*'
+              - Effect: Allow
+                Action:    
+                  - ec2:CreateNetworkInterface
+                  - ec2:DescribeNetworkInterfaces
+                  - ec2:DeleteNetworkInterface                  
+                Resource: !Sub 'arn:aws:ec2:${AWS::Region}:${AWS::AccountId}:network-interface/*'
+
+  SecurityGroupIngressRules:
+    Type: Custom::SecurityGroupIngressRules
+    Properties:
+      ServiceToken: !GetAtt SecurityGroupIngressFunction.Arn
+      SecurityGroupId: !Ref TransferSecurityGroup
+      IPAddresses: !Ref AllowedIPAddresses
+      Port: 22
+      EnableEgress: !Ref EnableEgressRules
+
+  # Lambda Security Group
+  LambdaSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Security group for Lambda functions
+      VpcId: !Ref VPC
+      SecurityGroupEgress:
+        - IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          Description: Allow HTTPS connectivity within VPC
+          CidrIp: !Ref VpcCIDR 
+
+  CloudWatchLogsVPCEndpoint:
+    Type: AWS::EC2::VPCEndpoint
+    Properties:
+      ServiceName: !Sub "com.amazonaws.${AWS::Region}.logs"
+      VpcEndpointType: Interface
+      VpcId: !Ref VPC
+      SubnetIds:
+        - !Ref PrivateSubnet1
+        - !Ref PrivateSubnet2
+      SecurityGroupIds:
+        - !Ref LambdaSecurityGroup
+      PrivateDnsEnabled: true
+  # EC2 VPC Endpoint
+  EC2EndpointSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Security group for SNS VPC endpoint
+      VpcId: !Ref VPC
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          CidrIp: !Ref VpcCIDR
+          Description: Allow connectivity over 443 port
+      SecurityGroupEgress:
+        - IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          CidrIp: !Ref VpcCIDR
+          Description: Allow connectivity over 443 port
+
+  EC2VPCEndpoint:
+    Type: AWS::EC2::VPCEndpoint
+    Properties:
+      ServiceName: !Sub "com.amazonaws.${AWS::Region}.ec2"
+      VpcEndpointType: Interface
+      VpcId: !Ref VPC
+      SubnetIds:
+        - !Ref PrivateSubnet1
+        - !Ref PrivateSubnet2
+      SecurityGroupIds:
+        - !Ref EC2EndpointSecurityGroup
+      PrivateDnsEnabled: true
+      
+  CloudFormationVPCEndpoint:
+    Type: AWS::EC2::VPCEndpoint
+    Properties:
+      ServiceName: !Sub "com.amazonaws.${AWS::Region}.cloudformation"
+      VpcEndpointType: Interface
+      VpcId: !Ref VPC
+      SubnetIds:
+        - !Ref PrivateSubnet1
+        - !Ref PrivateSubnet2
+      SecurityGroupIds:
+        - !Ref EC2EndpointSecurityGroup
+      PrivateDnsEnabled: true
+
   # KMS Key for S3 Encryption
   KMSEncryptionKey:
     Type: AWS::KMS::Key
     Properties:
-      Description: 'KMS Key for S3 bucket encryption'
+      Description: 'KMS Key for S3 bucket encryption and Lambda environment variables'
       EnableKeyRotation: true
       PendingWindowInDays: 30
       KeyPolicy:
@@ -53,6 +669,17 @@ Resources:
             Effect: Allow
             Principal:
               Service: !Sub 'logs.${AWS::Region}.amazonaws.com'
+            Action:
+            - kms:Encrypt
+            - kms:Decrypt
+            - kms:ReEncrypt*
+            - kms:GenerateDataKey*
+            - kms:Describe*
+            Resource: "*"
+          - Sid: Allow Lambda to use the key for environment variables
+            Effect: Allow
+            Principal:
+              Service: !Sub 'lambda.amazonaws.com'
             Action:
             - kms:Encrypt
             - kms:Decrypt
@@ -87,6 +714,7 @@ Resources:
       LoggingConfiguration:
         DestinationBucketName: !Ref UploadAccessLoggingBucket
         LogFilePrefix: "bucket-access-logs/"
+
   # Log bucket to store access logs
   UploadAccessLoggingBucket:
     Type: AWS::S3::Bucket
@@ -600,6 +1228,15 @@ Resources:
             Resource:
               - !Sub arn:aws:s3:::${ErrorBucket}/*
               - !Sub arn:aws:s3:::${ErrorBucket}
+# WAF IP Set for custom IP filtering
+  WAFIPSet:
+    Type: AWS::WAFv2::IPSet
+    Properties:
+      Name: !Sub "${AWS::StackName}-CustomIPSet"
+      Description: "IP set for custom IP filtering"
+      Scope: REGIONAL
+      IPAddressVersion: IPV4
+      Addresses: !Ref AllowedIPAddresses
 
   # AWS WAF Web ACL
   WAFWebACL:
@@ -615,8 +1252,23 @@ Resources:
         MetricName: latest-TransferFamilyProtection
         SampledRequestsEnabled: true
       Rules:
-        - Name: RateLimitRule
+        # Custom IP Set Rule
+        - Name: CustomIPSetRule
           Priority: 0
+          Action:
+            !If
+              - IsAllowAction
+              - Allow: {}
+              - Block: {}
+          VisibilityConfig:
+            CloudWatchMetricsEnabled: true
+            MetricName: CustomIPSetRule
+            SampledRequestsEnabled: true
+          Statement:
+            IPSetReferenceStatement:
+              ARN: !GetAtt WAFIPSet.Arn      
+        - Name: RateLimitRule
+          Priority: 1
           Action:
             Block: {}
           VisibilityConfig:
@@ -628,7 +1280,7 @@ Resources:
               Limit: 100
               AggregateKeyType: IP
         - Name: AWS-AWSManagedRulesCommonRuleSet
-          Priority: 1
+          Priority: 2
           OverrideAction:
             None: {}
           VisibilityConfig:
@@ -640,7 +1292,7 @@ Resources:
               VendorName: AWS
               Name: AWSManagedRulesCommonRuleSet
         - Name: AWSManagedRulesKnownBadInputsRuleSet
-          Priority: 2
+          Priority: 3
           OverrideAction:
             None: {}
           VisibilityConfig:
@@ -653,7 +1305,7 @@ Resources:
               Name: AWSManagedRulesKnownBadInputsRuleSet
         # Amazon IP Reputation List
         - Name: 'AWS-AWSManagedRulesAmazonIpReputationList'
-          Priority: 3
+          Priority: 4
           OverrideAction:
             None: {}
           VisibilityConfig:
@@ -667,7 +1319,7 @@ Resources:
               ExcludedRules: []
         # Anonymous IP List
         - Name: 'AWS-AWSManagedRulesAnonymousIpList'
-          Priority: 4
+          Priority: 5
           OverrideAction:
             None: {}
           VisibilityConfig:
@@ -816,6 +1468,12 @@ Resources:
                   - cognito-idp:AdminInitiateAuth
                   - cognito-idp:AdminGetUser
                 Resource: !GetAtt UserPool.Arn
+              - Effect: Allow
+                Action:    
+                  - ec2:CreateNetworkInterface
+                  - ec2:DescribeNetworkInterfaces
+                  - ec2:DeleteNetworkInterface                  
+                Resource: !Sub 'arn:aws:ec2:${AWS::Region}:${AWS::AccountId}:network-interface/*'
 
   AuthLambdaFunction:
     Type: AWS::Lambda::Function
@@ -826,6 +1484,12 @@ Resources:
       Runtime: python3.12
       Timeout: 30
       ReservedConcurrentExecutions: 2
+      VpcConfig:
+        SecurityGroupIds:
+          - !Ref LambdaSecurityGroup
+        SubnetIds:
+          - !Ref PrivateSubnet1
+          - !Ref PrivateSubnet2      
       Environment:
         Variables:
           USER_POOL_ID: !Ref UserPool
@@ -833,6 +1497,7 @@ Resources:
           UPLOAD_BUCKET: !Sub '${UploadBucketName}-${AWS::AccountId}'
           AWS_ACCOUNT_ID: !Ref 'AWS::AccountId'
           AWS_STACK_NAME: !Ref 'AWS::StackName'
+      KmsKeyArn: !GetAtt KMSEncryptionKey.Arn
       Code:
         ZipFile: |
           import json
@@ -892,11 +1557,32 @@ Resources:
                   print(f"Public key authentication not supported for user: {username}")
                   return {}
 
+  # Elastic IPs for Transfer Family
+  TransferEIP1:
+    Type: AWS::EC2::EIP
+    Properties:
+      Domain: vpc
+
+  TransferEIP2:
+    Type: AWS::EC2::EIP
+    Properties:
+      Domain: vpc
+
   # AWS Transfer Family SFTP Server
   TransferServer:
     Type: AWS::Transfer::Server
     Properties:
-      EndpointType: PUBLIC
+      EndpointType: VPC
+      EndpointDetails:
+        VpcId: !Ref VPC
+        SubnetIds:
+          - !Ref PublicSubnet1
+          - !Ref PublicSubnet2
+        SecurityGroupIds:
+          - !Ref TransferSecurityGroup
+        AddressAllocationIds:
+          - !GetAtt TransferEIP1.AllocationId
+          - !GetAtt TransferEIP2.AllocationId
       IdentityProviderType: AWS_LAMBDA
       IdentityProviderDetails:
         Function: !GetAtt AuthLambdaFunction.Arn
@@ -991,7 +1677,16 @@ Resources:
               - Effect: Allow
                 Action: sns:Publish
                 Resource: !Ref SecurityNotificationTopic
-
+        - PolicyName: EC2NetworkInterface
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:    
+                  - ec2:CreateNetworkInterface
+                  - ec2:DescribeNetworkInterfaces
+                  - ec2:DeleteNetworkInterface                  
+                Resource: !Sub 'arn:aws:ec2:${AWS::Region}:${AWS::AccountId}:network-interface/*'
   # File Routing Lambda Function
   FileRoutingLambdaFunction:
     Type: AWS::Lambda::Function
@@ -1002,6 +1697,12 @@ Resources:
       Runtime: python3.12
       Timeout: 60
       ReservedConcurrentExecutions: 2
+      VpcConfig:
+        SecurityGroupIds:
+          - !Ref LambdaSecurityGroup
+        SubnetIds:
+          - !Ref PrivateSubnet1
+          - !Ref PrivateSubnet2      
       Environment:
         Variables:
           UPLOAD_BUCKET: !Sub '${UploadBucketName}-${AWS::AccountId}'
@@ -1010,6 +1711,7 @@ Resources:
           ERROR_BUCKET: !Sub '${ErrorBucketName}-${AWS::AccountId}'
           SNS_TOPIC_ARN: !Ref SecurityNotificationTopic
           KMS_KEY_ID: !GetAtt KMSEncryptionKey.Arn
+      KmsKeyArn: !GetAtt KMSEncryptionKey.Arn
       Code:
         ZipFile: |
           import os
@@ -1125,6 +1827,31 @@ Resources:
     DependsOn: 
       - WAFLogGroup
 Outputs:
+
+  VpcId:
+    Description: VPC ID
+    Value: !Ref VPC
+    
+  PublicSubnets:
+    Description: Public Subnets
+    Value: !Join [",", [!Ref PublicSubnet1, !Ref PublicSubnet2]]
+    
+  PrivateSubnets:
+    Description: Private Subnets
+    Value: !Join [",", [!Ref PrivateSubnet1, !Ref PrivateSubnet2]]
+    
+  TransferServerEndpoints:
+    Description: Transfer Server Endpoints
+    Value: !Join [",", [!GetAtt TransferEIP1.PublicIp, !GetAtt TransferEIP2.PublicIp]]
+    
+  S3VPCEndpointId:
+    Description: S3 VPC Endpoint ID
+    Value: !Ref S3VPCEndpoint
+    
+  SNSVPCEndpointId:
+    Description: SNS VPC Endpoint ID
+    Value: !Ref SNSVPCEndpoint
+
   TransferServerEndpoint:
     Description: "SFTP Server Endpoint"
     Value: !Sub "${TransferServer}.server.transfer.${AWS::Region}.amazonaws.com"
