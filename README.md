@@ -1,4 +1,4 @@
-# WAF + AWS Transfer Family + GuardDuty Malware Scanning Solution
+# AWS Transfer Family + GuardDuty Malware Scanning Solution
 
 A comprehensive CloudFormation template that deploys a secure file transfer solution with automated malware scanning and intelligent file routing within a VPC.
 
