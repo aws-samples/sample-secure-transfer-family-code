@@ -1,5 +1,5 @@
 AWSTemplateFormatVersion: '2010-09-09'
-Description: 'WAF + AWS Transfer Family + GuardDuty Malware Scanning Solution'
+Description: 'AWS Transfer Family + Cognito + GuardDuty Malware Scanning Solution'
 
 Parameters:
   UploadBucketName:
@@ -26,11 +26,6 @@ Parameters:
     Type: String
     Description: Email address for security team notifications
     Default: security-team@example.com
-
-  WAFLogGroupName:
-    Type: String
-    Description: AWS WAF Logging Log Group Name
-    Default: aws-waf-logs-malware-scan
 
   VPCFlowLogsLogGroupName:
     Type: String
@@ -561,15 +556,13 @@ Resources:
                   - ec2:AuthorizeSecurityGroupEgress
                   - ec2:RevokeSecurityGroupEgress
                   - ec2:DescribeSecurityGroups
-                Resource:
-                  - !Sub 'arn:aws:ec2:${AWS::Region}:${AWS::AccountId}:security-group/*'
-                  - !Sub 'arn:aws:ec2:${AWS::Region}:${AWS::AccountId}:security-group-rule/*'
+                Resource: '*'
               - Effect: Allow
                 Action:    
                   - ec2:CreateNetworkInterface
                   - ec2:DescribeNetworkInterfaces
                   - ec2:DeleteNetworkInterface                  
-                Resource: !Sub 'arn:aws:ec2:${AWS::Region}:${AWS::AccountId}:network-interface/*'
+                Resource: '*'
 
   SecurityGroupIngressRules:
     Type: Custom::SecurityGroupIngressRules
@@ -591,7 +584,7 @@ Resources:
           FromPort: 443
           ToPort: 443
           Description: Allow HTTPS connectivity within VPC
-          CidrIp: !Ref VpcCIDR 
+          CidrIp: 0.0.0.0/0 
 
   CloudWatchLogsVPCEndpoint:
     Type: AWS::EC2::VPCEndpoint
@@ -624,31 +617,31 @@ Resources:
           CidrIp: !Ref VpcCIDR
           Description: Allow connectivity over 443 port
 
-  EC2VPCEndpoint:
-    Type: AWS::EC2::VPCEndpoint
-    Properties:
-      ServiceName: !Sub "com.amazonaws.${AWS::Region}.ec2"
-      VpcEndpointType: Interface
-      VpcId: !Ref VPC
-      SubnetIds:
-        - !Ref PrivateSubnet1
-        - !Ref PrivateSubnet2
-      SecurityGroupIds:
-        - !Ref EC2EndpointSecurityGroup
-      PrivateDnsEnabled: true
+  # EC2VPCEndpoint:
+  #   Type: AWS::EC2::VPCEndpoint
+  #   Properties:
+  #     ServiceName: !Sub "com.amazonaws.${AWS::Region}.ec2"
+  #     VpcEndpointType: Interface
+  #     VpcId: !Ref VPC
+  #     SubnetIds:
+  #       - !Ref PrivateSubnet1
+  #       - !Ref PrivateSubnet2
+  #     SecurityGroupIds:
+  #       - !Ref EC2EndpointSecurityGroup
+  #     PrivateDnsEnabled: true
       
-  CloudFormationVPCEndpoint:
-    Type: AWS::EC2::VPCEndpoint
-    Properties:
-      ServiceName: !Sub "com.amazonaws.${AWS::Region}.cloudformation"
-      VpcEndpointType: Interface
-      VpcId: !Ref VPC
-      SubnetIds:
-        - !Ref PrivateSubnet1
-        - !Ref PrivateSubnet2
-      SecurityGroupIds:
-        - !Ref EC2EndpointSecurityGroup
-      PrivateDnsEnabled: true
+  # CloudFormationVPCEndpoint:
+  #   Type: AWS::EC2::VPCEndpoint
+  #   Properties:
+  #     ServiceName: !Sub "com.amazonaws.${AWS::Region}.cloudformation"
+  #     VpcEndpointType: Interface
+  #     VpcId: !Ref VPC
+  #     SubnetIds:
+  #       - !Ref PrivateSubnet1
+  #       - !Ref PrivateSubnet2
+  #     SecurityGroupIds:
+  #       - !Ref EC2EndpointSecurityGroup
+  #     PrivateDnsEnabled: true
 
   # KMS Key for S3 Encryption
   KMSEncryptionKey:
@@ -1228,109 +1221,7 @@ Resources:
             Resource:
               - !Sub arn:aws:s3:::${ErrorBucket}/*
               - !Sub arn:aws:s3:::${ErrorBucket}
-# WAF IP Set for custom IP filtering
-  WAFIPSet:
-    Type: AWS::WAFv2::IPSet
-    Properties:
-      Name: !Sub "${AWS::StackName}-CustomIPSet"
-      Description: "IP set for custom IP filtering"
-      Scope: REGIONAL
-      IPAddressVersion: IPV4
-      Addresses: !Ref AllowedIPAddresses
 
-  # AWS WAF Web ACL
-  WAFWebACL:
-    Type: AWS::WAFv2::WebACL
-    Properties:
-      Description: WAF for Transfer Family Protection
-      Name: latest-TransferFamilyProtection
-      Scope: REGIONAL
-      DefaultAction:
-        Allow: {}
-      VisibilityConfig:
-        CloudWatchMetricsEnabled: true
-        MetricName: latest-TransferFamilyProtection
-        SampledRequestsEnabled: true
-      Rules:
-        # Custom IP Set Rule
-        - Name: CustomIPSetRule
-          Priority: 0
-          Action:
-            !If
-              - IsAllowAction
-              - Allow: {}
-              - Block: {}
-          VisibilityConfig:
-            CloudWatchMetricsEnabled: true
-            MetricName: CustomIPSetRule
-            SampledRequestsEnabled: true
-          Statement:
-            IPSetReferenceStatement:
-              ARN: !GetAtt WAFIPSet.Arn      
-        - Name: RateLimitRule
-          Priority: 1
-          Action:
-            Block: {}
-          VisibilityConfig:
-            CloudWatchMetricsEnabled: true
-            MetricName: RateLimitRule
-            SampledRequestsEnabled: true
-          Statement:
-            RateBasedStatement:
-              Limit: 100
-              AggregateKeyType: IP
-        - Name: AWS-AWSManagedRulesCommonRuleSet
-          Priority: 2
-          OverrideAction:
-            None: {}
-          VisibilityConfig:
-            SampledRequestsEnabled: true
-            CloudWatchMetricsEnabled: true
-            MetricName: AWS-AWSManagedRulesCommonRuleSet
-          Statement:
-            ManagedRuleGroupStatement:
-              VendorName: AWS
-              Name: AWSManagedRulesCommonRuleSet
-        - Name: AWSManagedRulesKnownBadInputsRuleSet
-          Priority: 3
-          OverrideAction:
-            None: {}
-          VisibilityConfig:
-            SampledRequestsEnabled: true
-            CloudWatchMetricsEnabled: true
-            MetricName: AWSManagedRulesKnownBadInputsRuleSet
-          Statement:
-            ManagedRuleGroupStatement:
-              VendorName: AWS
-              Name: AWSManagedRulesKnownBadInputsRuleSet
-        # Amazon IP Reputation List
-        - Name: 'AWS-AWSManagedRulesAmazonIpReputationList'
-          Priority: 4
-          OverrideAction:
-            None: {}
-          VisibilityConfig:
-            SampledRequestsEnabled: true
-            CloudWatchMetricsEnabled: true
-            MetricName: 'AWS-AWSManagedRulesAmazonIpReputationList'
-          Statement:
-            ManagedRuleGroupStatement:
-              VendorName: 'AWS'
-              Name: 'AWSManagedRulesAmazonIpReputationList'
-              ExcludedRules: []
-        # Anonymous IP List
-        - Name: 'AWS-AWSManagedRulesAnonymousIpList'
-          Priority: 5
-          OverrideAction:
-            None: {}
-          VisibilityConfig:
-            SampledRequestsEnabled: true
-            CloudWatchMetricsEnabled: true
-            MetricName: 'AWS-AWSManagedRulesAnonymousIpList'
-          Statement:
-            ManagedRuleGroupStatement:
-              VendorName: 'AWS'
-              Name: 'AWSManagedRulesAnonymousIpList'
-              ExcludedRules: []
   # Cognito User Pool
   UserPool:
     Type: AWS::Cognito::UserPool
@@ -1384,15 +1275,6 @@ Resources:
         - ALLOW_REFRESH_TOKEN_AUTH
       PreventUserExistenceErrors: ENABLED
 
-  # WAF WebACL Association with Cognito User Pool
-  WAFWebACLAssociation:
-    Type: AWS::WAFv2::WebACLAssociation
-    Properties:
-      ResourceArn: !GetAtt UserPool.Arn
-      WebACLArn: !GetAtt WAFWebACL.Arn
-    DependsOn:
-      - WAFWebACL
-      - UserPool
   # IAM Role for Transfer Family
   TransferLoggingRole:
     Type: AWS::IAM::Role
@@ -1473,7 +1355,7 @@ Resources:
                   - ec2:CreateNetworkInterface
                   - ec2:DescribeNetworkInterfaces
                   - ec2:DeleteNetworkInterface                  
-                Resource: !Sub 'arn:aws:ec2:${AWS::Region}:${AWS::AccountId}:network-interface/*'
+                Resource: '*'
 
   AuthLambdaFunction:
     Type: AWS::Lambda::Function
@@ -1686,7 +1568,7 @@ Resources:
                   - ec2:CreateNetworkInterface
                   - ec2:DescribeNetworkInterfaces
                   - ec2:DeleteNetworkInterface                  
-                Resource: !Sub 'arn:aws:ec2:${AWS::Region}:${AWS::AccountId}:network-interface/*'
+                Resource: '*'
   # File Routing Lambda Function
   FileRoutingLambdaFunction:
     Type: AWS::Lambda::Function
@@ -1809,23 +1691,6 @@ Resources:
       Principal: events.amazonaws.com
       SourceArn: !GetAtt GuardDutyEventRule.Arn
 
-  # CloudWatch Log Group for WAF
-  WAFLogGroup:
-    Type: AWS::Logs::LogGroup
-    Properties:
-      LogGroupName: !Ref WAFLogGroupName
-      RetentionInDays: 7
-      KmsKeyId: !GetAtt KMSEncryptionKey.Arn
-
-  # WAF Logging Configuration
-  WAFLoggingConfiguration:
-    Type: AWS::WAFv2::LoggingConfiguration
-    Properties:
-      ResourceArn: !GetAtt WAFWebACL.Arn
-      LogDestinationConfigs:
-        - !Sub 'arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:${WAFLogGroupName}'
-    DependsOn: 
-      - WAFLogGroup
 Outputs:
 
   VpcId:

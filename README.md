@@ -2,6 +2,20 @@
 
 A comprehensive CloudFormation template that deploys a secure file transfer solution with automated malware scanning and intelligent file routing within a VPC.
 
+## 📑 Solution Summary
+
+This solution provides a secure SFTP service using AWS Transfer Family with automated malware scanning capabilities through GuardDuty Malware Protection for S3. It creates a complete infrastructure including:
+
+- A VPC-based SFTP server with Cognito authentication
+- Automated malware scanning for all uploaded files
+- Intelligent file routing based on scan results
+- Real-time security notifications
+- Comprehensive encryption with KMS
+- Secure network architecture with VPC endpoints
+- IP-based access control through security groups
+
+The solution is designed for organizations that need to securely exchange files with external parties while ensuring all incoming files are scanned for malware before being processed. It provides a complete end-to-end workflow from secure file upload to malware detection and appropriate file handling.
+
 ## 🏗️ Architecture Overview
 
   <p align="center">
@@ -10,32 +24,94 @@ A comprehensive CloudFormation template that deploys a secure file transfer solu
 
 This solution provides:
 - **Secure SFTP Server** with Cognito authentication via AWS Lambda
-- **VPC-based Architecture** with public and private subnets
-- **WAF Protection** with custom IP filtering and rate limiting
+- **VPC-based Architecture** with public and private subnets across multiple AZs
+- **IP-based Access Control** for both ingress and egress traffic with configurable allow/block lists
 - **Automated Malware Scanning** using GuardDuty Malware Protection for S3
 - **Intelligent File Routing** based on scan results via EventBridge and Lambda
-- **Real-time Notifications** for security incidents via SNS
-- **KMS Encryption** for all S3 buckets with automatic key rotation
-- **VPC Endpoints** for secure AWS service access without internet
-- **IP-based Access Control** for both ingress and egress traffic
+- **Real-time Notifications** for security incidents via SNS (encrypted with KMS)
+- **KMS Encryption** for all S3 buckets with automatic key rotation (365 days)
+- **VPC Endpoints** for secure AWS service access without internet exposure
+- **Comprehensive Logging** with CloudWatch integration and S3 access logs
+
+## ⚠️ Prerequisites
+
+Before deploying this solution, ensure you have:
+
+1. **AWS Account Access**: Administrator access to an AWS account
+2. **GuardDuty Configuration**:
+   - GuardDuty must be enabled in your AWS account
+   - GuardDuty Malware Protection for S3 must be enabled
+   - You can enable these in the GuardDuty console under "Protection Plans"
+3. **Service Limits**:
+   - Sufficient VPC limits (solution creates a new VPC with multiple subnets)
+   - At least 3 available Elastic IP addresses (1 for NAT Gateway, 2 for Transfer endpoints)
+   - Sufficient Lambda concurrency limits
+4. **Email Address**: A valid email address for security notifications
+5. **IP Addresses**: List of allowed IP addresses/CIDR blocks for access control (optional)
+6. **AWS CLI**: Configured AWS CLI if deploying via command line
+7. **CloudFormation Permissions**: Permissions to create resources including IAM roles (CAPABILITY_NAMED_IAM)
+
+## ⚙️ Technical Requirements
+
+- **AWS Region**: The region must support all services used in the template:
+  - AWS Transfer Family
+  - Amazon Cognito
+  - Amazon GuardDuty with Malware Protection for S3
+  - AWS Lambda
+  - Amazon EventBridge
+  - Amazon SNS
+  - AWS KMS
+  - Amazon VPC and related networking services
+- **S3 Bucket Names**: Ensure the default bucket names are available or provide custom names
+- **IAM Permissions**: The deploying user must have permissions to create IAM roles and policies
+
+## 🚫 Limitations
+
+1. **GuardDuty Dependency**: The solution relies entirely on GuardDuty Malware Protection for S3 for malware scanning. If this service is unavailable or experiences delays, the file processing workflow will be affected.
+
+2. **Scanning Limitations**: GuardDuty Malware Protection for S3 has certain limitations:
+   - Maximum file size for scanning (currently 4GB)
+   - Certain file types may not be scannable
+   - Scanning occurs asynchronously and may take time for large files
+
+3. **Authentication Method**: The solution uses Cognito username/password authentication only. Certificate-based or other authentication methods are not supported in this template.
+
+4. **IP-Based Access Control**: The solution implements IP-based access control through security groups only, not through AWS WAF, which may be needed for more advanced protection.
+
+5. **Scaling Considerations**: 
+   - The solution uses a fixed number of Elastic IPs and subnets
+   - For high-volume transfers, you may need to adjust Lambda concurrency limits
+
+6. **Cost Implications**:
+   - Running multiple VPC endpoints incurs costs
+   - GuardDuty Malware Protection for S3 has associated costs based on the amount of data scanned
+   - S3 storage and data transfer costs will apply
+
+7. **Regional Availability**: Some services used may not be available in all AWS regions
+
+8. **Monitoring Limitations**: While the solution provides basic monitoring through CloudWatch, it does not include advanced monitoring or alerting for performance metrics.
+
+9. **No Built-in WAF Protection**: The solution does not include AWS WAF integration for additional protection against web exploits.
+
+10. **No Multi-Factor Authentication**: The template does not configure MFA for Cognito users by default.
 
 ## 🔍 Detailed Component Architecture
 
 ### VPC Network Architecture
 The solution deploys a secure VPC with the following components:
 
-- **VPC**: A dedicated VPC with CIDR block 10.0.0.0/16 (configurable)
+- **VPC**: A dedicated VPC with CIDR block 10.0.0.0/16 (configurable via parameters)
 - **Subnets**:
-  - **Public Subnets**: Two public subnets (10.0.1.0/24, 10.0.2.0/24) in different AZs for high availability
-  - **Private Subnets**: Two private subnets (10.0.3.0/24, 10.0.4.0/24) in different AZs for Lambda functions
+  - **Public Subnets**: Two public subnets (10.0.1.0/24, 10.0.2.0/24 by default) in different AZs for high availability
+  - **Private Subnets**: Two private subnets (10.0.3.0/24, 10.0.4.0/24 by default) in different AZs for Lambda functions
 - **Internet Gateway**: Provides internet access for public subnets
-- **NAT Gateway**: Allows outbound internet access from private subnets
+- **NAT Gateway**: Allows outbound internet access from private subnets with an Elastic IP
 - **Route Tables**: Separate route tables for public and private subnets
-- **VPC Flow Logs**: Captures network traffic information for security analysis with 14-day retention
+- **VPC Flow Logs**: Captures network traffic information for security analysis with configurable retention (default 14 days)
 - **Security Groups**:
-  - **Transfer Security Group**: Controls access to the SFTP server
+  - **Transfer Security Group**: Controls access to the SFTP server with dynamic rules based on allowed IP addresses
   - **Lambda Security Group**: Controls network access for Lambda functions
-  - **VPC Endpoint Security Groups**: Control access to VPC endpoints
+  - **VPC Endpoint Security Groups**: Control access to VPC endpoints with least privilege permissions
 
 ### VPC Endpoints
 The solution creates the following VPC endpoints to enable secure communication without traversing the internet:
@@ -70,22 +146,16 @@ The solution deploys a secure SFTP server with the following components:
 - **Client**: Named `SFTPClient-${AWS::AccountId}`
 - **Authentication Flows**: User password and admin authentication enabled
 - **Password Policy**: Minimum 8 characters with uppercase, lowercase, numbers, and symbols
-- **WAF Protection**: Web ACL associated with the User Pool for additional security
 - **Email Verification**: Email verification required for new users
 
-### WAF Protection Configuration
-The solution implements a comprehensive WAF protection layer with the following components:
+### IP-Based Access Control
+The solution provides IP-based access control through security groups:
 
-- **Regional Web ACL**: Named `latest-TransferFamilyProtection` with detailed logging to CloudWatch
-- **Custom IP Set Rule**: Configurable to either ALLOW or BLOCK specified IP addresses (priority 0)
-- **Rate Limiting Rule**: Limits requests to 100 per IP address to prevent brute force attacks (priority 1)
-- **AWS Managed Rule Sets**:
-  - **Common Rule Set**: Provides protection against common web exploits (priority 2)
-  - **Known Bad Inputs**: Blocks requests with known malicious patterns (priority 3)
-  - **Amazon IP Reputation List**: Blocks requests from IPs with poor reputation (priority 4)
-  - **Anonymous IP List**: Blocks requests from anonymous proxy services (priority 5)
-- **WAF Logging**: All WAF events are logged to a dedicated CloudWatch log group with 7-day retention
-- **Association**: The WAF Web ACL is associated with the Cognito User Pool to protect authentication
+- **Security Group Rules**: Controls access at the network layer
+  - Dynamically managed by a Lambda function
+  - Supports both ingress (inbound) and egress (outbound) traffic control
+  - Configurable to restrict outbound traffic to specific IPs
+  - Custom Lambda function updates rules based on CloudFormation parameters
 
 ### S3 Security
 - **KMS encryption** at rest with automatic key rotation (365 days)
@@ -126,12 +196,7 @@ FAILED → Error Bucket (with KMS encryption)
 ```
 
 ### IP-Based Access Control
-The solution provides two layers of IP-based access control:
-
-- **WAF IP Set**: Controls access at the application layer through the WAF Web ACL
-  - Can be configured to either ALLOW or BLOCK specified IPs
-  - Applied to the Cognito User Pool to protect authentication
-  - Logs all actions to CloudWatch
+The solution provides IP-based access control through security groups:
 
 - **Security Group Rules**: Controls access at the network layer
   - Dynamically managed by a Lambda function
@@ -242,6 +307,19 @@ aws cloudformation describe-stacks \
 ```
 
 The deployment typically takes 15-20 minutes to complete due to the creation of VPC endpoints and other resources.
+    ParameterKey=AllowedIPAddresses,ParameterValue=\"192.168.1.1/32,10.0.0.0/24\" \
+    ParameterKey=IPSetAction,ParameterValue=Allow \
+    ParameterKey=EnableEgressRules,ParameterValue=true \
+    ParameterKey=VpcCIDR,ParameterValue=10.0.0.0/16 \
+  --capabilities CAPABILITY_NAMED_IAM
+
+# Monitor the stack creation progress
+aws cloudformation describe-stacks \
+  --stack-name malware-scanning-sftp \
+  --query 'Stacks[0].StackStatus'
+```
+
+The deployment typically takes 15-20 minutes to complete due to the creation of VPC endpoints and other resources.
 
 ### 2. Create Cognito Users
 
@@ -310,6 +388,15 @@ EOF
 # The File Routing Lambda will move it to the appropriate bucket based on scan results
 # You can check the status in CloudWatch Logs
 ```
+sftp user@company.com@$TRANSFER_ENDPOINT << EOF
+put test.txt
+quit
+EOF
+
+# GuardDuty will automatically scan the file
+# The File Routing Lambda will move it to the appropriate bucket based on scan results
+# You can check the status in CloudWatch Logs
+```
 
 ## 📈 Monitoring & Logging
 
@@ -318,7 +405,6 @@ EOF
 - **Authentication Lambda**: `/aws/lambda/<stack-name>-AuthLambdaFunction-<id>`
 - **File Routing Lambda**: `/aws/lambda/<stack-name>-FileRoutingLambdaFunction-<id>`
 - **Transfer Family**: CloudWatch logging enabled
-- **WAF Logs**: `<WAFLogGroupName>` (7-day retention, KMS encrypted)
 - **S3 Access Logs**: Stored in dedicated logging buckets with lifecycle policies
 - **VPC Flow Logs**: Stored in CloudWatch Logs with 14-day retention (configurable)
 
@@ -330,7 +416,6 @@ Malware detection triggers email alerts with:
 - Timestamp
 
 ### CloudWatch Metrics
-- **WAF Metrics**: Request counts, blocked requests, allowed requests
 - **Transfer Family Metrics**: Connection count, file transfer metrics
 - **Lambda Metrics**: Invocation count, duration, error count
 - **S3 Metrics**: Storage metrics, request counts
@@ -343,7 +428,7 @@ Malware detection triggers email alerts with:
 - Verify user exists in Cognito User Pool
 - Check user status (confirmed/enabled)
 - Ensure correct password
-- Verify IP is allowed in WAF IP set and security group
+- Verify IP is allowed in security group
 - Check Authentication Lambda logs for errors
 - Verify Transfer Family service role has correct permissions
 
@@ -368,12 +453,6 @@ Malware detection triggers email alerts with:
 - Review CloudWatch logs for specific errors
 - Verify KMS key permissions
 
-**WAF Not Blocking/Allowing Traffic**
-- Check WAF Web ACL configuration
-- Verify IP set contains correct IP addresses
-- Check WAF logs for request details
-- Verify WAF Web ACL association with Cognito User Pool
-
 ### Useful Commands
 
 ```bash
@@ -389,12 +468,6 @@ aws logs describe-log-groups --log-group-name-prefix /aws/lambda/
 # Check GuardDuty status
 aws guardduty list-detectors
 
-# View WAF logs for blocked requests
-aws logs filter-log-events \
-  --log-group-name "aws-waf-logs-malware-scan" \
-  --filter-pattern '{ $.action = "BLOCK" }' \
-  --max-items 10
-
 # Check security group rules
 aws ec2 describe-security-groups \
   --group-ids <SECURITY_GROUP_ID> \
@@ -403,6 +476,14 @@ aws ec2 describe-security-groups \
 # Check Transfer Server status
 aws transfer describe-server \
   --server-id <SERVER_ID>
+
+# List files in S3 buckets
+aws s3 ls s3://<BUCKET_NAME>/ --recursive
+
+# Check EventBridge rule
+aws events describe-rule \
+  --name <RULE_NAME>
+```
 
 # List files in S3 buckets
 aws s3 ls s3://<BUCKET_NAME>/ --recursive
@@ -424,8 +505,6 @@ After deployment, the stack provides:
 - **VpcId**: VPC ID
 - **PublicSubnets**: Public subnet IDs
 - **PrivateSubnets**: Private subnet IDs
-- **WAFIPSetId**: WAF IP set ID
-- **WAFWebACLId**: WAF Web ACL ID
 
 ## 🧹 Cleanup
 
@@ -462,15 +541,34 @@ For issues or questions:
 
 ## 🔐 Security Best Practices
 
-- Regularly rotate Cognito user passwords and enable MFA
-- Monitor CloudWatch logs for suspicious activity
-- Review SNS notification logs
-- Keep WAF rules updated
-- Update allowed IP addresses as needed
-- Enable AWS Config for compliance monitoring
-- Monitor KMS key usage and rotation
-- Review S3 access logs regularly for unauthorized access
-- Implement least privilege access for all IAM roles
+### Implemented in the Template
+- KMS encryption for all S3 buckets with automatic key rotation
+- VPC-based architecture with private subnets for Lambda functions
+- IP-based access control through security groups
+- Cognito authentication for SFTP users
+- Least privilege IAM roles and policies
+- S3 bucket policies enforcing HTTPS-only access
+- VPC endpoints for secure AWS service access
+- Comprehensive logging with CloudWatch integration
+- GuardDuty Malware Protection for automated scanning
+- SNS notifications for security incidents (encrypted with KMS)
+
+### Additional Recommended Practices
+- Implement AWS WAF for additional protection of Cognito endpoints
+- Enable Multi-Factor Authentication (MFA) for Cognito users
+- Implement AWS Shield for DDoS protection
+- Configure AWS Config for continuous compliance monitoring
+- Implement AWS CloudTrail for comprehensive API logging
+- Set up Amazon GuardDuty for threat detection beyond malware scanning
+- Implement AWS Security Hub for centralized security management
+- Use AWS Secrets Manager for credential management
+- Implement network traffic monitoring with VPC Traffic Mirroring
+- Configure AWS Macie for sensitive data discovery and protection
+- Implement regular security assessments and penetration testing
+- Establish a formal incident response plan
+- Implement automated patching for all components
+- Conduct regular security training for administrators
+- Implement AWS Organizations for multi-account security management
 
 ---
 
