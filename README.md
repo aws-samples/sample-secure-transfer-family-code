@@ -19,7 +19,7 @@ The solution is designed for organizations that need to securely exchange files 
 ## 🏗️ Architecture Overview
 
   <p align="center">
-    <img src="waf-aws-transfer-family.png" alt="Architecture Image">
+    <img src="sample-aws-transfer-family.png" alt="Architecture Image">
   </p>
 
 This solution provides:
@@ -76,7 +76,7 @@ Before deploying this solution, ensure you have:
 
 3. **Authentication Method**: The solution uses Cognito username/password authentication only. Certificate-based or other authentication methods are not supported in this template.
 
-4. **IP-Based Access Control**: The solution implements IP-based access control through security groups only, not through AWS WAF, which may be needed for more advanced protection.
+4. **IP-Based Access Control**: The solution implements IP-based access control through security groups only.
 
 5. **Scaling Considerations**: 
    - The solution uses a fixed number of Elastic IPs and subnets
@@ -91,9 +91,7 @@ Before deploying this solution, ensure you have:
 
 8. **Monitoring Limitations**: While the solution provides basic monitoring through CloudWatch, it does not include advanced monitoring or alerting for performance metrics.
 
-9. **No Built-in WAF Protection**: The solution does not include AWS WAF integration for additional protection against web exploits.
-
-10. **No Multi-Factor Authentication**: The template does not configure MFA for Cognito users by default.
+9. **No Multi-Factor Authentication**: The template does not configure MFA for Cognito users by default.
 
 ## 🔍 Detailed Component Architecture
 
@@ -287,11 +285,11 @@ The solution uses EventBridge to connect GuardDuty Malware Protection with the F
 
 ```bash
 # Clone the repository or download the template file
-# Make sure you're using the correct template filename (waf-transfer-family-template.yml)
+# Make sure you're using the correct template filename (secure-transfer-family-template.yml)
 
 aws cloudformation create-stack \
   --stack-name malware-scanning-sftp \
-  --template-body file://waf-transfer-family-template.yml \
+  --template-body file://secure-transfer-family-template.yml \
   --parameters \
     ParameterKey=SecurityTeamEmail,ParameterValue=your-email@company.com \
     ParameterKey=AllowedIPAddresses,ParameterValue=\"192.168.1.1/32,10.0.0.0/24\" \
@@ -554,7 +552,6 @@ For issues or questions:
 - SNS notifications for security incidents (encrypted with KMS)
 
 ### Additional Recommended Practices
-- Implement AWS WAF for additional protection of Cognito endpoints
 - Enable Multi-Factor Authentication (MFA) for Cognito users
 - Implement AWS Shield for DDoS protection
 - Configure AWS Config for continuous compliance monitoring
