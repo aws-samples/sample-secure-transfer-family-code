@@ -67,31 +67,27 @@ Before deploying this solution, ensure you have:
 
 ## 🚫 Limitations
 
-1. **GuardDuty Dependency**: The solution relies entirely on GuardDuty Malware Protection for S3 for malware scanning. If this service is unavailable or experiences delays, the file processing workflow will be affected.
-
-2. **Scanning Limitations**: GuardDuty Malware Protection for S3 has certain limitations:
-   - Maximum file size for scanning (currently 4GB)
+1. **Scanning Limitations**: GuardDuty Malware Protection for S3 has certain limitations:
+   - Maximum file size for scanning
    - Certain file types may not be scannable
    - Scanning occurs asynchronously and may take time for large files
 
-3. **Authentication Method**: The solution uses Cognito username/password authentication only. Certificate-based or other authentication methods are not supported in this template.
+2. **Authentication Method**: The solution uses Cognito username/password authentication only. Certificate-based or other authentication methods are not supported in this template.
 
-4. **IP-Based Access Control**: The solution implements IP-based access control through security groups only.
+3. **IP-Based Access Control**: The solution implements IP-based access control through security groups only.
 
-5. **Scaling Considerations**: 
+4. **Scaling Considerations**: 
    - The solution uses a fixed number of Elastic IPs and subnets
    - For high-volume transfers, you may need to adjust Lambda concurrency limits
 
-6. **Cost Implications**:
+5. **Cost Implications**:
    - Running multiple VPC endpoints incurs costs
    - GuardDuty Malware Protection for S3 has associated costs based on the amount of data scanned
    - S3 storage and data transfer costs will apply
 
-7. **Regional Availability**: Some services used may not be available in all AWS regions
+6. **Monitoring Limitations**: While the solution provides basic monitoring through CloudWatch, it does not include advanced monitoring or alerting for performance metrics.
 
-8. **Monitoring Limitations**: While the solution provides basic monitoring through CloudWatch, it does not include advanced monitoring or alerting for performance metrics.
-
-9. **No Multi-Factor Authentication**: The template does not configure MFA for Cognito users by default.
+7. **No Multi-Factor Authentication**: The template does not configure MFA for Cognito users by default.
 
 ## 🔍 Detailed Component Architecture
 
@@ -266,18 +262,6 @@ The solution uses EventBridge to connect GuardDuty Malware Protection with the F
 - **Event Source**: aws.guardduty
 - **Detail Type**: GuardDuty Malware Protection Object Scan Result
 - **Filter**: Only processes events for the upload bucket
-
-## 📋 Prerequisites
-
-- AWS Account with appropriate permissions (Administrator access recommended for deployment)
-- **GuardDuty enabled** in your AWS account with the latest features
-- **GuardDuty Malware Protection for S3** enabled in your account
-  - This can be enabled in the GuardDuty console under "Protection Plans"
-  - Required for automated malware scanning functionality
-- Valid email address for security notifications (will receive malware alerts)
-- List of allowed IP addresses/CIDR blocks for access control (optional)
-- Sufficient VPC limits in your account (the solution creates a new VPC)
-- Sufficient EIP limits (the solution uses 3 Elastic IPs - 1 for NAT Gateway, 2 for Transfer endpoints)
 
 ## 🚀 Quick Start
 
