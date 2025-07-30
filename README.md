@@ -19,7 +19,7 @@ The solution is designed for organizations that need to securely exchange files 
 ## 🏗️ Architecture Overview
 
   <p align="center">
-    <img src="sample-aws-transfer-family.png" alt="Architecture Image">
+    <img src="sample-security-transfer-family.png" alt="Architecture Image">
   </p>
 
 This solution provides:
