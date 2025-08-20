@@ -553,4 +553,75 @@ For issues or questions:
 
 ---
 
+### Configuration details in solution
+
+## Amazon VPC Network Architecture
+The solution deploys a secure VPC with the following components:
+VPC: A dedicated VPC with CIDR block 10.0.0.0/16 (configurable)
+Subnets:
+Public Subnets: Two public subnets (10.0.1.0/24, 10.0.2.0/24) in different AZs for high availability
+Private Subnets: Two private subnets (10.0.3.0/24, 10.0.4.0/24) in different AZs for Lambda functions
+Internet Gateway: Provides internet access for public subnets
+NAT Gateway: Allows outbound internet access from private subnets
+Route Tables: Separate route tables for public and private subnets
+VPC Flow Logs: Captures network traffic information for security analysis with 14-day retention
+
+# Security Groups:
+Transfer Security Group: Controls access to the SFTP server
+Lambda Security Group: Controls network access for Lambda functions
+VPC Endpoint Security Groups: Control access to VPC endpoints
+
+# Amazon VPC Endpoints
+The solution creates the following VPC endpoints to enable secure communication without traversing the internet:
+S3 Gateway Endpoint: Allows access to S3 buckets from within the VPC
+SNS Interface Endpoint: Enables Lambda functions to publish to SNS topics
+CloudWatch Logs Interface Endpoint: Allows Lambda functions to send logs to CloudWatch
+EC2 Interface Endpoint: Enables Lambda functions to interact with EC2 API
+CloudFormation Interface Endpoint: Enables Lambda functions to interact with CloudFormation API
+
+# AWS Transfer Family Configuration
+The solution deploys a secure SFTP server with the following components:
+VPC-based SFTP Server: Deployed in public subnets with Elastic IPs for high availability
+Custom Authentication: Uses Lambda function to authenticate users against Cognito User Pool
+Security Policy: Uses TransferSecurityPolicy-2020-06 for secure SFTP connections
+Protocol: SFTP only (port 22)
+Logging: CloudWatch logging enabled via Transfer logging role
+Home Directory: User's home directory is mapped to the upload bucket
+Access Control: Users can only access their designated S3 bucket with least privilege permissions
+
+# Authentication Flow
+User connects to SFTP server with username and password
+Transfer Family invokes the Authentication Lambda function
+Lambda authenticates the user against Cognito User Pool
+If successful, Lambda returns the IAM role and home directory mapping
+Transfer Family assumes the role and provides access to the user
+User can now upload files to the designated S3 bucket
+
+# Amazon Cognito User Pool Configuration
+User Pool: Named SFTPUserPool-${AWS::AccountId}
+Client: Named SFTPClient-${AWS::AccountId}
+Authentication Flows: User password and admin authentication enabled
+Password Policy: Minimum 8 characters with uppercase, lowercase, numbers, and symbols
+Email Verification: Email verification required for new users
+
+# Amazon S3 Security
+KMS encryption at rest with automatic key rotation (365 days)
+Versioning enabled on all primary buckets for data protection and recovery
+Public access blocked on all buckets through comprehensive bucket policies
+Secure transport required (HTTPS/TLS only) enforced through explicit deny policies
+Account-specific bucket names to prevent conflicts using ${AWS::AccountId} suffix
+Dedicated access logging buckets for each primary bucket with separate retention policies:
+  - Upload Bucket: ${UploadBucketName}-access-logs-${AWS::AccountId}
+	- Clean Bucket: ${CleanBucketName}-access-logs-${AWS::AccountId}
+  - Malware Bucket: ${MalwareBucketName}-access-logs-${AWS::AccountId}
+  - Error Bucket: ${ErrorBucketName}-access-logs-${AWS::AccountId}
+  - Lifecycle policies for automated data management and cost optimization:
+  - Primary buckets: 90-day retention for noncurrent versions
+  - Access logs: 90-day retention with transition to STANDARD_IA after 30 days and GLACIER after 60 days
+  - Intelligent tiering and archival to Glacier for long-term storage:
+    - STANDARD_IA after 30 days
+    - INTELLIGENT_TIERING after 90 days
+    - GLACIER after 180 days
+Bucket policies that enforce least privilege access for Lambda functions and Transfer users
+
 **Note**: This solution requires GuardDuty Malware Protection to be enabled in your AWS account for automated scanning functionality.
