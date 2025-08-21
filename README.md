@@ -553,9 +553,9 @@ For issues or questions:
 
 ---
 
-### Configuration details in solution
+# Configuration details in solution
 
-## Amazon VPC Network Architecture
+### Amazon VPC Network Architecture
 The solution deploys a secure VPC with the following components:
 VPC: A dedicated VPC with CIDR block 10.0.0.0/16 (configurable)
 Subnets:
@@ -566,12 +566,12 @@ NAT Gateway: Allows outbound internet access from private subnets
 Route Tables: Separate route tables for public and private subnets
 VPC Flow Logs: Captures network traffic information for security analysis with 14-day retention
 
-# Security Groups:
+### Security Groups:
 Transfer Security Group: Controls access to the SFTP server
 Lambda Security Group: Controls network access for Lambda functions
 VPC Endpoint Security Groups: Control access to VPC endpoints
 
-# Amazon VPC Endpoints
+### Amazon VPC Endpoints
 The solution creates the following VPC endpoints to enable secure communication without traversing the internet:
 S3 Gateway Endpoint: Allows access to S3 buckets from within the VPC
 SNS Interface Endpoint: Enables Lambda functions to publish to SNS topics
@@ -579,7 +579,7 @@ CloudWatch Logs Interface Endpoint: Allows Lambda functions to send logs to Clou
 EC2 Interface Endpoint: Enables Lambda functions to interact with EC2 API
 CloudFormation Interface Endpoint: Enables Lambda functions to interact with CloudFormation API
 
-# AWS Transfer Family Configuration
+### AWS Transfer Family Configuration
 The solution deploys a secure SFTP server with the following components:
 VPC-based SFTP Server: Deployed in public subnets with Elastic IPs for high availability
 Custom Authentication: Uses Lambda function to authenticate users against Cognito User Pool
@@ -589,7 +589,7 @@ Logging: CloudWatch logging enabled via Transfer logging role
 Home Directory: User's home directory is mapped to the upload bucket
 Access Control: Users can only access their designated S3 bucket with least privilege permissions
 
-# Authentication Flow
+### Authentication Flow
 User connects to SFTP server with username and password
 Transfer Family invokes the Authentication Lambda function
 Lambda authenticates the user against Cognito User Pool
@@ -597,14 +597,14 @@ If successful, Lambda returns the IAM role and home directory mapping
 Transfer Family assumes the role and provides access to the user
 User can now upload files to the designated S3 bucket
 
-# Amazon Cognito User Pool Configuration
+### Amazon Cognito User Pool Configuration
 User Pool: Named SFTPUserPool-${AWS::AccountId}
 Client: Named SFTPClient-${AWS::AccountId}
 Authentication Flows: User password and admin authentication enabled
 Password Policy: Minimum 8 characters with uppercase, lowercase, numbers, and symbols
 Email Verification: Email verification required for new users
 
-# Amazon S3 Security
+### Amazon S3 Security
 KMS encryption at rest with automatic key rotation (365 days)
 Versioning enabled on all primary buckets for data protection and recovery
 Public access blocked on all buckets through comprehensive bucket policies
