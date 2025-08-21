@@ -617,32 +617,6 @@ Resources:
           CidrIp: !Ref VpcCIDR
           Description: Allow connectivity over 443 port
 
-  # EC2VPCEndpoint:
-  #   Type: AWS::EC2::VPCEndpoint
-  #   Properties:
-  #     ServiceName: !Sub "com.amazonaws.${AWS::Region}.ec2"
-  #     VpcEndpointType: Interface
-  #     VpcId: !Ref VPC
-  #     SubnetIds:
-  #       - !Ref PrivateSubnet1
-  #       - !Ref PrivateSubnet2
-  #     SecurityGroupIds:
-  #       - !Ref EC2EndpointSecurityGroup
-  #     PrivateDnsEnabled: true
-      
-  # CloudFormationVPCEndpoint:
-  #   Type: AWS::EC2::VPCEndpoint
-  #   Properties:
-  #     ServiceName: !Sub "com.amazonaws.${AWS::Region}.cloudformation"
-  #     VpcEndpointType: Interface
-  #     VpcId: !Ref VPC
-  #     SubnetIds:
-  #       - !Ref PrivateSubnet1
-  #       - !Ref PrivateSubnet2
-  #     SecurityGroupIds:
-  #       - !Ref EC2EndpointSecurityGroup
-  #     PrivateDnsEnabled: true
-
   # KMS Key for S3 Encryption
   KMSEncryptionKey:
     Type: AWS::KMS::Key
